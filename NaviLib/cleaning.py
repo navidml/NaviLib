@@ -636,7 +636,9 @@ def clean_column(
     fill_value: Optional[object] = None,
     n_neighbors: int = 5,
     estimator=None,
-) -> pd.DataFrame:
+    phase: Literal["fit", "transform", "fit_transform"] = "fit_transform",
+    imputer_instance=None,  # برای انتقال imputer در مرحله transform
+) -> Union[pd.DataFrame, tuple[pd.DataFrame, object]]:
     """
     Clean or impute missing values in a specific column.
 
@@ -656,71 +658,126 @@ def clean_column(
         Number of neighbors for KNN.
     estimator : sklearn estimator, optional
         Estimator for iterative imputer.
+    phase : {"fit", "transform", "fit_transform"}
+        - "fit_transform": train and apply imputer (default, for training data)
+        - "fit": only train imputer, return fitted imputer
+        - "transform": apply pre-fitted imputer (for test data)
+    imputer_instance : object, optional
+        Pre-fitted imputer to use when phase="transform".
 
     Returns
     -------
-    pd.DataFrame
-        DataFrame with cleaned column.
+    pd.DataFrame or tuple
+        If phase="fit_transform" or "transform": returns cleaned DataFrame.
+        If phase="fit": returns tuple (original DataFrame, fitted imputer object).
     """
     if column not in df.columns:
         raise KeyError(f"Column '{column}' not found in DataFrame.")
 
+    # روش‌هایی که نیاز به fit/transform ندارند
+    if method in ["drop_column", "drop_rows"]:
+        if phase in ["fit", "transform"]:
+            raise ValueError(f"Method '{method}' does not support phase='{phase}'. Use 'fit_transform'.")
+        
+        df = df.copy()
+        if method == "drop_column":
+            return df.drop(columns=[column])
+        else:  # drop_rows
+            return df.dropna(subset=[column])
+
+    # روش‌های نیازمند imputer
     df = df.copy()
     method = method.lower()
 
-    if method == "drop_column":
-        return df.drop(columns=[column])
+    # --- مرحله fit (فقط آموزش) ---
+    if phase == "fit":
+        if method == "simple":
+            if strategy == "constant" and fill_value is None:
+                raise ValueError("fill_value must be provided when strategy='constant'.")
+            if strategy in ["mean", "median"] and not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError(f"Strategy '{strategy}' requires numeric column.")
+            imputer = SimpleImputer(strategy=strategy, fill_value=fill_value)
+            imputer.fit(df[[column]])
+            return df, imputer
 
-    if method == "drop_rows":
-        return df.dropna(subset=[column])
+        elif method == "knn":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("KNN imputation requires numeric columns.")
+            if n_neighbors <= 0:
+                raise ValueError("n_neighbors must be greater than 0.")
+            imputer = KNNImputer(n_neighbors=n_neighbors)
+            imputer.fit(df[[column]])
+            return df, imputer
 
-    if method == "simple":
-        if strategy == "constant" and fill_value is None:
-            raise ValueError("fill_value must be provided when strategy='constant'.")
+        elif method == "iter":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("Iterative imputation requires numeric columns.")
+            imputer = IterativeImputer(estimator=estimator)
+            imputer.fit(df[[column]])
+            return df, imputer
 
-        if strategy in ["mean", "median"] and not pd.api.types.is_numeric_dtype(df[column]):
-            raise ValueError(f"Strategy '{strategy}' requires numeric column.")
+        elif method == "mice":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("MICE imputation requires numeric columns.")
+            mice_estimator = estimator if estimator is not None else BayesianRidge()
+            imputer = IterativeImputer(
+                estimator=mice_estimator,
+                max_iter=10,
+                sample_posterior=True,
+                random_state=42,
+            )
+            imputer.fit(df[[column]])
+            return df, imputer
 
-        imputer = SimpleImputer(strategy=strategy, fill_value=fill_value)
-        df[[column]] = imputer.fit_transform(df[[column]])
+    # --- مرحله transform (فقط اعمال) ---
+    elif phase == "transform":
+        if imputer_instance is None:
+            raise ValueError("imputer_instance must be provided when phase='transform'.")
+        
+        df[[column]] = imputer_instance.transform(df[[column]])
         return df
 
-    if method == "knn":
-        if not pd.api.types.is_numeric_dtype(df[column]):
-            raise ValueError("KNN imputation requires numeric columns.")
-        if n_neighbors <= 0:
-            raise ValueError("n_neighbors must be greater than 0.")
+    # --- مرحله fit_transform (پیش‌فرض) ---
+    else:  # fit_transform
+        if method == "simple":
+            if strategy == "constant" and fill_value is None:
+                raise ValueError("fill_value must be provided when strategy='constant'.")
+            if strategy in ["mean", "median"] and not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError(f"Strategy '{strategy}' requires numeric column.")
+            imputer = SimpleImputer(strategy=strategy, fill_value=fill_value)
+            df[[column]] = imputer.fit_transform(df[[column]])
+            return df
 
-        imputer = KNNImputer(n_neighbors=n_neighbors)
-        df[[column]] = imputer.fit_transform(df[[column]])
-        return df
+        elif method == "knn":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("KNN imputation requires numeric columns.")
+            if n_neighbors <= 0:
+                raise ValueError("n_neighbors must be greater than 0.")
+            imputer = KNNImputer(n_neighbors=n_neighbors)
+            df[[column]] = imputer.fit_transform(df[[column]])
+            return df
 
-    if method == "iter":
-        if not pd.api.types.is_numeric_dtype(df[column]):
-            raise ValueError("Iterative imputation requires numeric columns.")
+        elif method == "iter":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("Iterative imputation requires numeric columns.")
+            imputer = IterativeImputer(estimator=estimator)
+            df[[column]] = imputer.fit_transform(df[[column]])
+            return df
 
-        imputer = IterativeImputer(estimator=estimator)
-        df[[column]] = imputer.fit_transform(df[[column]])
-        return df
-
-    if method == "mice":
-        if not pd.api.types.is_numeric_dtype(df[column]):
-            raise ValueError("MICE imputation requires numeric columns.")
-
-        mice_estimator = estimator if estimator is not None else BayesianRidge()
-
-        imputer = IterativeImputer(
-            estimator=mice_estimator,
-            max_iter=10,
-            sample_posterior=True,
-            random_state=42,
-        )
-
-        df[[column]] = imputer.fit_transform(df[[column]])
-        return df
+        elif method == "mice":
+            if not pd.api.types.is_numeric_dtype(df[column]):
+                raise ValueError("MICE imputation requires numeric columns.")
+            mice_estimator = estimator if estimator is not None else BayesianRidge()
+            imputer = IterativeImputer(
+                estimator=mice_estimator,
+                max_iter=10,
+                sample_posterior=True,
+                random_state=42,
+            )
+            df[[column]] = imputer.fit_transform(df[[column]])
+            return df
 
     raise ValueError("Invalid method. Choose from: drop_column, drop_rows, simple, knn, iter, mice.")
-
 
 # ================================================================
 #  DUPLICATE REPORT
