@@ -25,7 +25,12 @@ from sklearn.preprocessing import (
     RobustScaler,
     MaxAbsScaler,
 )
-
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import (
+    silhouette_score,
+    silhouette_samples
+)
 
 # =============================================================================
 # Auto Best Transformation
