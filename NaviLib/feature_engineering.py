@@ -822,6 +822,252 @@ def balance_data(
     
     return X_balanced, y_balanced
 
+
+def find_best_k_auto(
+    df, 
+    features='auto',  # 'auto', 'all', or list of column names
+    exclude=None,     # list of columns to exclude
+    k_range=range(2, 11),
+    scale=True,
+    visualize_pca=True,
+    random_state=42
+):
+    """
+    Intelligent K-Means analyzer that automatically detects features
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        Your dataframe
+    features : 'auto', 'all', or list
+        - 'auto': automatically select numeric columns
+        - 'all': use all numeric columns
+        - list: specify column names
+    exclude : list
+        Column names to exclude (e.g., ['ID', 'Date'])
+    k_range : range
+        Range of k to test
+    scale : bool
+        Standardize features
+    visualize_pca : bool
+        Show PCA visualization of clusters
+    random_state : int
+        Reproducibility
+    
+    Returns:
+    --------
+    dict with results and recommendations
+    """
+    
+    # ========== 1. AUTO-DETECT FEATURES ==========
+    print("\n" + "="*70)
+    print(" K-MEANS CLUSTERING ANALYZER".center(70))
+    print("="*70)
+    
+    # Get numeric columns only
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    if features == 'auto':
+        selected_features = numeric_cols
+        print(f" Auto-selected {len(selected_features)} numeric features:")
+    elif features == 'all':
+        selected_features = df.columns.tolist()
+        print(f" Using all {len(selected_features)} columns:")
+    else:
+        selected_features = features
+        print(f" Using {len(selected_features)} specified features:")
+    
+    # Exclude columns if specified
+    if exclude:
+        selected_features = [col for col in selected_features if col not in exclude]
+        print(f"   (Excluded: {exclude})")
+    
+    # Show feature list (first 10)
+    for i, col in enumerate(selected_features[:10]):
+        print(f"   {i+1}. {col}")
+    if len(selected_features) > 10:
+        print(f"   ... and {len(selected_features)-10} more")
+    
+    # Check if we have enough features
+    if len(selected_features) < 2:
+        raise ValueError(f"Need at least 2 features. Found only {len(selected_features)}")
+    
+    # Extract data
+    X = df[selected_features].copy().values
+    
+    # ========== 2. DATA QUALITY REPORT ==========
+    print("\n" + "-"*70)
+    print(" DATA QUALITY REPORT")
+    print("-"*70)
+    print(f"Total samples    : {len(X):,}")
+    print(f"Total features   : {len(selected_features)}")
+    print(f"Missing values   : {np.isnan(X).sum()}")
+    print(f"Feature ranges   :")
+    for i, col in enumerate(selected_features[:5]):
+        print(f"   {col}: [{df[col].min():.2f} - {df[col].max():.2f}]")
+    
+    # ========== 3. SCALE DATA ==========
+    if scale:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        print(f"\n Data scaled using StandardScaler")
+    else:
+        X_scaled = X
+        print(f"\n⚠️  No scaling applied")
+    
+    # ========== 4. CALCULATE METRICS ==========
+    print("\n" + "-"*70)
+    print("🔄 CALCULATING METRICS".center(70))
+    print("-"*70)
+    
+    inertias = []
+    silhouette_scores = []
+    k_list = list(k_range)
+    
+    for k in k_list:
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        labels = kmeans.fit_predict(X_scaled)
+        inertias.append(kmeans.inertia_)
+        silhouette_scores.append(silhouette_score(X_scaled, labels))
+        print(f"\r   Processing k={k}/{max(k_list)}", end="", flush=True)
+    
+    print("\n Done!")
+    
+    # ========== 5. FIND BEST K ==========
+    # Elbow method
+    if len(inertias) > 2:
+        diffs = np.diff(inertias)
+        diffs2 = np.diff(diffs)
+        elbow_idx = np.argmin(diffs2) + 1 if len(diffs2) > 0 else 0
+        best_k_elbow = k_list[elbow_idx + 1]
+    else:
+        best_k_elbow = k_list[np.argmin(inertias)]
+    
+    # Silhouette method
+    best_k_sil = k_list[np.argmax(silhouette_scores)]
+    
+    # Consensus (if both agree, use that; otherwise prefer silhouette)
+    if best_k_elbow == best_k_sil:
+        best_k_final = best_k_elbow
+        consensus = "✅ PERFECT AGREEMENT"
+    else:
+        best_k_final = best_k_sil  # Silhouette is usually more reliable
+        consensus = "DISAGREEMENT (using silhouette)"
+    
+    # ========== 6. FINAL MODEL ==========
+    kmeans_final = KMeans(n_clusters=best_k_final, random_state=random_state, n_init=10)
+    final_labels = kmeans_final.fit_predict(X_scaled)
+    
+    # Add cluster labels to original dataframe
+    df_with_clusters = df.copy()
+    df_with_clusters['Cluster'] = final_labels
+    
+    # ========== 7. VISUALIZATIONS ==========
+    # Plot 1: Elbow and Silhouette
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('K-Means Clustering Analysis', fontsize=16, fontweight='bold')
+    
+    # Elbow plot
+    axes[0, 0].plot(k_list, inertias, 'bo-', linewidth=2, markersize=8)
+    axes[0, 0].axvline(best_k_elbow, color='red', linestyle='--', alpha=0.7, label=f'Elbow: k={best_k_elbow}')
+    axes[0, 0].axvline(best_k_sil, color='green', linestyle=':', alpha=0.7, label=f'Silhouette: k={best_k_sil}')
+    axes[0, 0].set_xlabel('Number of Clusters (k)')
+    axes[0, 0].set_ylabel('Inertia')
+    axes[0, 0].set_title('Elbow Method', fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Silhouette plot
+    axes[0, 1].plot(k_list, silhouette_scores, 'go-', linewidth=2, markersize=8)
+    axes[0, 1].axvline(best_k_final, color='red', linestyle='--', label=f'Best k = {best_k_final}')
+    axes[0, 1].set_xlabel('Number of Clusters (k)')
+    axes[0, 1].set_ylabel('Silhouette Score')
+    axes[0, 1].set_title(f'Silhouette Score (Best: {max(silhouette_scores):.3f})', fontweight='bold')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Silhouette plot for best k
+    sil_samples = silhouette_samples(X_scaled, final_labels)
+    y_lower = 10
+    axes[1, 0].set_title(f'Silhouette Plot (k={best_k_final})', fontweight='bold')
+    for i in range(best_k_final):
+        cluster_sil = sil_samples[final_labels == i]
+        cluster_sil.sort()
+        y_upper = y_lower + len(cluster_sil)
+        axes[1, 0].fill_betweenx(np.arange(y_lower, y_upper), 0, cluster_sil, alpha=0.7)
+        axes[1, 0].text(-0.05, y_lower + len(cluster_sil)/2, str(i))
+        y_lower = y_upper + 10
+    axes[1, 0].axvline(np.mean(sil_samples), color='red', linestyle='--', label=f'Average: {np.mean(sil_samples):.3f}')
+    axes[1, 0].set_xlabel('Silhouette Coefficient')
+    axes[1, 0].set_ylabel('Cluster')
+    axes[1, 0].legend()
+    
+    # PCA Visualization (if features >= 2)
+    if visualize_pca and len(selected_features) >= 2:
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X_scaled)
+        
+        scatter = axes[1, 1].scatter(X_pca[:, 0], X_pca[:, 1], c=final_labels, cmap='tab10', alpha=0.6, s=50)
+        axes[1, 1].scatter(kmeans_final.cluster_centers_[:, 0], kmeans_final.cluster_centers_[:, 1], 
+                          c='red', marker='X', s=200, edgecolors='black', linewidths=2, label='Centroids')
+        axes[1, 1].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+        axes[1, 1].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+        axes[1, 1].set_title(f'PCA Visualization (k={best_k_final})', fontweight='bold')
+        axes[1, 1].legend()
+        plt.colorbar(scatter, ax=axes[1, 1])
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # ========== 8. CLUSTER ANALYSIS ==========
+    print("\n" + "="*70)
+    print("🎯 CLUSTER ANALYSIS RESULTS".center(70))
+    print("="*70)
+    
+    print(f"\n📊 BEST K BY DIFFERENT METHODS:")
+    print(f"   • Elbow Method      : k = {best_k_elbow}")
+    print(f"   • Silhouette Method : k = {best_k_sil}")
+    print(f"   • {consensus}")
+    print(f"\n✨ RECOMMENDED K = {best_k_final}")
+    print(f"   Silhouette Score: {np.mean(sil_samples):.4f}")
+    
+    # Cluster sizes
+    print(f"\n📦 CLUSTER SIZES:")
+    cluster_sizes = pd.Series(final_labels).value_counts().sort_index()
+    for cluster, size in cluster_sizes.items():
+        percentage = size / len(final_labels) * 100
+        bar = '█' * int(percentage / 2)
+        print(f"   Cluster {cluster}: {size:4d} samples ({percentage:5.1f}%) {bar}")
+    
+    # Feature importance per cluster
+    print(f"\n🔍 FEATURE PROFILE BY CLUSTER (top features):")
+    cluster_profile = pd.DataFrame(X_scaled, columns=selected_features)
+    cluster_profile['Cluster'] = final_labels
+    
+    for cluster in range(best_k_final):
+        cluster_data = cluster_profile[cluster_profile['Cluster'] == cluster]
+        means = cluster_data[selected_features].mean()
+        top_features = means.abs().nlargest(3).index.tolist()
+        print(f"\n   Cluster {cluster}:")
+        for feat in top_features:
+            val = means[feat]
+            direction = "HIGH" if val > 0 else "LOW"
+            print(f"      • {feat}: {val:+.2f} ({direction})")
+    
+    # ========== 9. RETURN RESULTS ==========
+    return {
+        'best_k': best_k_final,
+        'best_k_elbow': best_k_elbow,
+        'best_k_silhouette': best_k_sil,
+        'silhouette_score': np.mean(sil_samples),
+        'silhouette_scores': silhouette_scores,
+        'inertias': inertias,
+        'features_used': selected_features,
+        'labels': final_labels,
+        'df_with_clusters': df_with_clusters,
+        'cluster_sizes': cluster_sizes.to_dict(),
+        'kmeans_model': kmeans_final
+    }
 # =============================================================================
 # Module Metadata
 # =============================================================================
@@ -836,4 +1082,5 @@ __all__ = [
     "remove_outliers",
     "encode_categorical_features",
     "scale_features",
+    "find_best_k_auto"
 ]
