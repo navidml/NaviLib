@@ -78,7 +78,8 @@ from .feature_engineering import (
     analyze_outliers,
     save_outliers,
     remove_outliers,
-    balance_data
+    balance_data,
+    find_best_k_auto
 )
 
 # ==============================================================================
