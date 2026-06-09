@@ -26,6 +26,7 @@ from sklearn.preprocessing import (
     MaxAbsScaler,
 )
 from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     silhouette_score,
