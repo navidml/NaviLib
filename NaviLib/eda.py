@@ -34,7 +34,7 @@ Quick start
 >>> eda.plot_target(df, target="died")
 >>> eda.compare_distributions(train, test) # did the split go wrong?
 
-Author: rebuilt from distribution_analysis_lib
+Author: Navid Bordbar
 License: MIT
 """
 
