@@ -1477,6 +1477,340 @@ def plot_clustering(
 
 
 # ======================================================================
+#  5b. CLUSTER MODEL SELECTION
+# ======================================================================
+
+def find_best_k(
+    X,
+    k_range: Sequence[int] = range(2, 11),
+    algorithm: Literal["kmeans", "minibatch", "gmm", "agglomerative"] = "kmeans",
+    columns=None,
+    exclude: Optional[Sequence[str]] = None,
+    scale: bool = True,
+    metrics: Sequence[str] = ("inertia", "silhouette", "davies_bouldin",
+                              "calinski_harabasz"),
+    sample: Optional[int] = 10000,
+    random_state: int = 42,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Search for the number of clusters, reporting where the criteria disagree.
+
+    Four criteria are computed across ``k_range`` and each nominates its own
+    winner. They frequently disagree, and that disagreement is information:
+    it usually means the data have no sharply separated cluster structure,
+    and the honest answer is "pick k for the business reason, the data are
+    not deciding for you". The original hid this by silently deferring to
+    silhouette; here every criterion's choice is reported.
+
+    Criteria
+    --------
+    ``inertia``            within-cluster sum of squares. Always decreases
+                           with k, so it is read via the **elbow**: the k of
+                           maximum curvature, found here with the kneedle
+                           perpendicular-distance rule rather than a second
+                           difference, which is unstable on short ranges.
+    ``silhouette``         cohesion vs separation, higher is better.
+    ``davies_bouldin``     lower is better.
+    ``calinski_harabasz``  variance ratio, higher is better.
+
+    Parameters
+    ----------
+    X : DataFrame or array
+        Numeric columns are selected automatically from a DataFrame.
+    algorithm : str
+        ``gmm`` additionally reports BIC, which -- unlike every criterion
+        above -- has a genuine minimum and is the most principled way to
+        choose k when the clusters may overlap.
+    sample : int, optional
+        Silhouette is O(n^2) in memory; above this many rows it is computed
+        on a random subsample rather than hanging.
+
+    Returns
+    -------
+    dict with ``table`` (one row per k), ``best`` (per-criterion winners),
+    ``consensus``, ``labels`` for the consensus k, ``model``, and
+    ``agreement`` -- the share of criteria that picked the consensus k.
+
+    >>> res = ev.find_best_k(X, k_range=range(2, 9))
+    >>> res["table"]
+    >>> res["best"]
+    {'elbow': 4, 'silhouette': 4, 'davies_bouldin': 4, 'calinski_harabasz': 3}
+    """
+    from sklearn.metrics import (calinski_harabasz_score, davies_bouldin_score,
+                                 silhouette_score)
+    from sklearn.preprocessing import StandardScaler
+
+    # ---- select numeric data ------------------------------------------
+    if isinstance(X, pd.DataFrame):
+        cols = list(columns) if columns is not None else [
+            c for c in X.columns
+            if pd.api.types.is_numeric_dtype(X[c]) and not pd.api.types.is_bool_dtype(X[c])]
+        if exclude:
+            cols = [c for c in cols if c not in set(exclude)]
+        missing = [c for c in cols if c not in X.columns]
+        if missing:
+            raise KeyError(f"Columns not found: {missing}")
+        Xa = X[cols].to_numpy(dtype=float)
+        names = cols
+    else:
+        Xa = np.asarray(X, dtype=float)
+        names = [f"f{i}" for i in range(Xa.shape[1])]
+
+    if Xa.shape[1] < 2:
+        raise ValueError(f"Need at least 2 numeric features, got {Xa.shape[1]}.")
+
+    n_nan = int(np.isnan(Xa).any(axis=1).sum())
+    if n_nan:
+        raise ValueError(
+            f"{n_nan} row(s) contain missing values. Clustering cannot handle NaN -- "
+            f"impute first (datakit.fix_missing) or drop those rows."
+        )
+
+    Xs = StandardScaler().fit_transform(Xa) if scale else Xa
+    ks = [int(k) for k in k_range]
+    if min(ks) < 2:
+        raise ValueError("k must be at least 2.")
+    if max(ks) >= len(Xs):
+        raise ValueError(f"k={max(ks)} exceeds the number of samples ({len(Xs)}).")
+
+    rng = np.random.default_rng(random_state)
+    sil_idx = (rng.choice(len(Xs), sample, replace=False)
+               if sample and len(Xs) > sample else np.arange(len(Xs)))
+
+    # ---- sweep --------------------------------------------------------
+    rows, models = [], {}
+    for k in ks:
+        model, labels = _fit_cluster(Xs, k, algorithm, random_state)
+        models[k] = (model, labels)
+        rec: Dict[str, Any] = {"k": k}
+        if "inertia" in metrics:
+            rec["inertia"] = float(getattr(model, "inertia_", np.nan)) \
+                if hasattr(model, "inertia_") else _wcss(Xs, labels)
+        if len(np.unique(labels)) < 2:
+            rows.append(rec)
+            continue
+        if "silhouette" in metrics:
+            rec["silhouette"] = round(float(
+                silhouette_score(Xs[sil_idx], labels[sil_idx])), 4)
+        if "davies_bouldin" in metrics:
+            rec["davies_bouldin"] = round(float(davies_bouldin_score(Xs, labels)), 4)
+        if "calinski_harabasz" in metrics:
+            rec["calinski_harabasz"] = round(float(calinski_harabasz_score(Xs, labels)), 1)
+        if algorithm == "gmm":
+            rec["bic"] = round(float(model.bic(Xs)), 1)
+            rec["aic"] = round(float(model.aic(Xs)), 1)
+        sizes = pd.Series(labels).value_counts()
+        rec["smallest_cluster"] = int(sizes.min())
+        rec["balance"] = round(float(sizes.min() / sizes.max()), 3)
+        rows.append(rec)
+
+    table = pd.DataFrame(rows).set_index("k")
+
+    # ---- per-criterion winners ---------------------------------------
+    best: Dict[str, int] = {}
+    if "inertia" in table.columns and table["inertia"].notna().sum() >= 3:
+        best["elbow"] = _kneedle(table.index.to_numpy(),
+                                 table["inertia"].to_numpy())
+    for col, better in (("silhouette", "max"), ("davies_bouldin", "min"),
+                        ("calinski_harabasz", "max"), ("bic", "min")):
+        if col in table.columns and table[col].notna().any():
+            best[col] = int(table[col].idxmax() if better == "max"
+                            else table[col].idxmin())
+
+    votes = pd.Series(list(best.values())).value_counts()
+    consensus = int(votes.idxmax())
+    agreement = float(votes.iloc[0] / len(best)) if best else np.nan
+
+    model, labels = models[consensus]
+    out = {
+        "table": table,
+        "best": best,
+        "consensus": consensus,
+        "agreement": round(agreement, 3),
+        "labels": labels,
+        "model": model,
+        "features": names,
+        "scaled": scale,
+    }
+
+    if verbose:
+        print("=" * 66)
+        print(f"  FIND BEST K   {len(Xs):,} rows x {Xs.shape[1]} features   "
+              f"algorithm={algorithm}")
+        print("=" * 66)
+        print(table.to_string())
+        print("-" * 66)
+        for crit, k in best.items():
+            print(f"  {crit:20s} -> k = {k}")
+        print("-" * 66)
+        if agreement == 1.0:
+            print(f"  All criteria agree: k = {consensus}")
+        elif agreement >= 0.5:
+            print(f"  Majority ({votes.iloc[0]}/{len(best)}) picks k = {consensus}")
+        else:
+            print(f"  NO CONSENSUS — criteria split {dict(votes)}.")
+            print(f"  Weak or overlapping cluster structure: the data are not")
+            print(f"  choosing k for you. Pick it for an operational reason,")
+            print(f"  and check the silhouette profile before committing.")
+        sil = table["silhouette"].get(consensus, np.nan)
+        if np.isfinite(sil):
+            verdict = ("strong structure" if sil > .5 else
+                       "moderate structure" if sil > .25 else
+                       "WEAK structure — clusters overlap heavily")
+            print(f"  silhouette at k={consensus}: {sil:.3f} ({verdict})")
+        print("=" * 66)
+    return out
+
+
+def _fit_cluster(Xs: np.ndarray, k: int, algorithm: str, random_state: int):
+    if algorithm == "kmeans":
+        from sklearn.cluster import KMeans
+        m = KMeans(n_clusters=k, n_init=10, random_state=random_state)
+    elif algorithm == "minibatch":
+        from sklearn.cluster import MiniBatchKMeans
+        m = MiniBatchKMeans(n_clusters=k, n_init=10, random_state=random_state)
+    elif algorithm == "gmm":
+        from sklearn.mixture import GaussianMixture
+        m = GaussianMixture(n_components=k, random_state=random_state)
+        return m.fit(Xs), m.fit_predict(Xs)
+    elif algorithm == "agglomerative":
+        from sklearn.cluster import AgglomerativeClustering
+        m = AgglomerativeClustering(n_clusters=k)
+        return m, m.fit_predict(Xs)
+    else:
+        raise ValueError("algorithm must be kmeans, minibatch, gmm or agglomerative.")
+    labels = m.fit_predict(Xs)
+    return m, labels
+
+
+def _wcss(Xs: np.ndarray, labels: np.ndarray) -> float:
+    total = 0.0
+    for lv in np.unique(labels):
+        pts = Xs[labels == lv]
+        total += float(((pts - pts.mean(axis=0)) ** 2).sum())
+    return total
+
+
+def _kneedle(ks: np.ndarray, y: np.ndarray) -> int:
+    """Elbow by maximum perpendicular distance to the chord (kneedle rule).
+
+    Draw the straight line from the first point of the curve to the last;
+    the elbow is the point furthest from that line. Robust on short ranges,
+    unlike a second difference -- and, unlike ``argmin`` of the second
+    difference, it points at the elbow rather than at the flat tail.
+    """
+    ok = np.isfinite(y)
+    ks, y = ks[ok], y[ok]
+    if len(ks) < 3:
+        return int(ks[0])
+    x0, y0, x1, y1 = ks[0], y[0], ks[-1], y[-1]
+    dx, dy = x1 - x0, y1 - y0
+    norm = np.hypot(dx, dy) or 1.0
+    dist = np.abs(dy * ks - dx * y + x1 * y0 - y1 * x0) / norm
+    return int(ks[int(np.argmax(dist))])
+
+
+def plot_k_search(
+    result: Dict[str, Any],
+    X=None,
+    figsize: Tuple[float, float] = (14, 9),
+    show: bool = True,
+):
+    """Four-panel view of a :func:`find_best_k` result.
+
+    Elbow curve, silhouette curve, silhouette profile at the consensus k,
+    and a PCA scatter of the final labelling.
+
+    Centroids in the PCA panel are **projected through the same PCA** rather
+    than having their first two raw coordinates plotted. Taking
+    ``cluster_centers_[:, :2]`` puts points from the original feature space
+    onto axes labelled PC1/PC2, so the markers land somewhere arbitrary --
+    a mistake that is invisible unless you check.
+
+    Pass ``X`` (the same data given to :func:`find_best_k`) to get the two
+    bottom panels; without it only the two curves are drawn.
+    """
+    plt = _plt()
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import silhouette_samples
+    from sklearn.preprocessing import StandardScaler
+
+    table, k, labels = result["table"], result["consensus"], result["labels"]
+
+    with _style():
+        fig, ax = plt.subplots(2, 2, figsize=figsize)
+        a1, a2, a3, a4 = ax.ravel()
+
+        if "inertia" in table.columns:
+            a1.plot(table.index, table["inertia"], "o-", lw=2, color=PALETTE[0])
+            if "elbow" in result["best"]:
+                a1.axvline(result["best"]["elbow"], color=BAD, ls="--", lw=1.6,
+                           label=f"elbow k={result['best']['elbow']}")
+            a1.axvline(k, color=GOOD, ls=":", lw=1.8, label=f"consensus k={k}")
+            a1.set_xlabel("k"); a1.set_ylabel("inertia (WCSS)")
+            a1.set_title("Elbow curve", fontweight="bold", fontsize=11)
+            a1.legend(fontsize=8)
+        else:
+            a1.set_visible(False)
+
+        if "silhouette" in table.columns:
+            a2.plot(table.index, table["silhouette"], "o-", lw=2, color=PALETTE[2])
+            a2.axvline(k, color=BAD, ls="--", lw=1.6, label=f"k={k}")
+            a2.set_xlabel("k"); a2.set_ylabel("silhouette")
+            a2.set_title("Silhouette by k", fontweight="bold", fontsize=11)
+            a2.legend(fontsize=8)
+        else:
+            a2.set_visible(False)
+
+        if X is None:
+            a3.set_visible(False); a4.set_visible(False)
+            return _finish(fig, show)
+
+        Xa = (X[result["features"]].to_numpy(dtype=float)
+              if isinstance(X, pd.DataFrame) else np.asarray(X, dtype=float))
+        Xs = StandardScaler().fit_transform(Xa) if result["scaled"] else Xa
+
+        try:
+            sv = silhouette_samples(Xs, labels)
+            y0 = 0
+            for i, lv in enumerate(np.unique(labels)):
+                vals = np.sort(sv[labels == lv])
+                a3.fill_betweenx(np.arange(y0, y0 + len(vals)), 0, vals,
+                                 color=PALETTE[i % len(PALETTE)], alpha=.8)
+                a3.text(-0.05, y0 + len(vals) / 2, str(lv), fontsize=8, va="center")
+                y0 += len(vals) + max(5, len(sv) // 100)
+            a3.axvline(sv.mean(), color=BAD, ls="--", lw=1.5,
+                       label=f"mean {sv.mean():.3f}")
+            a3.axvline(0, color="black", lw=.8)
+            a3.set_xlabel("silhouette coefficient"); a3.set_yticks([])
+            a3.set_title(f"Silhouette profile (k={k})", fontweight="bold", fontsize=11)
+            a3.legend(fontsize=8)
+        except Exception:
+            a3.set_visible(False)
+
+        pca = PCA(n_components=2)
+        emb = pca.fit_transform(Xs)
+        for i, lv in enumerate(np.unique(labels)):
+            m = labels == lv
+            a4.scatter(emb[m, 0], emb[m, 1], s=12, alpha=.6, edgecolors="none",
+                       color=PALETTE[i % len(PALETTE)], label=f"{lv} (n={m.sum():,})")
+        centres = getattr(result["model"], "cluster_centers_", None)
+        if centres is None:
+            centres = np.vstack([Xs[labels == lv].mean(axis=0)
+                                 for lv in np.unique(labels)])
+        cen = pca.transform(centres)
+        a4.scatter(cen[:, 0], cen[:, 1], marker="X", s=180, c="black",
+                   edgecolors="white", linewidths=1.5, label="centroids", zorder=5)
+        v = pca.explained_variance_ratio_
+        a4.set_xlabel(f"PC1 ({v[0]:.0%})"); a4.set_ylabel(f"PC2 ({v[1]:.0%})")
+        a4.set_title(f"Clusters in PCA space (k={k})", fontweight="bold", fontsize=11)
+        if len(np.unique(labels)) <= 10:
+            a4.legend(fontsize=7, markerscale=1.4)
+
+        return _finish(fig, show)
+
+
+# ======================================================================
 #  5. RANKING
 # ======================================================================
 
@@ -1907,7 +2241,7 @@ __all__ = [
     # comparison / diagnosis
     "compare_models", "error_analysis",
     # clustering
-    "score_clustering", "plot_clustering",
+    "score_clustering", "plot_clustering", "find_best_k", "plot_k_search",
     # ranking & recommenders
     "score_ranking", "score_recommender", "plot_ranking",
 ]
