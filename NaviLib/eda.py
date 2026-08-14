@@ -34,7 +34,7 @@ Quick start
 >>> eda.plot_target(df, target="died")
 >>> eda.compare_distributions(train, test) # did the split go wrong?
 
-Author: Navid Bordbar
+Author: rebuilt from distribution_analysis_lib
 License: MIT
 """
 
@@ -56,54 +56,19 @@ Series = pd.Series
 SKEW_MODERATE = 0.5
 SKEW_STRONG = 1.0
 KURT_TOL = 0.5
-DEFAULT_PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52",
-                   "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
 
 
 # ----------------------------------------------------------------------
 # infrastructure
 # ----------------------------------------------------------------------
 
-def _plt():
-    import matplotlib.pyplot as plt
-    return plt
+# Shared helpers live in _common so a fix lands once, not three times.
+try:                                    # inside the package
+    from ._common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
+except ImportError:                     # running the file standalone
+    from _common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
 
-
-def _sns():
-    try:
-        import seaborn as sns
-        return sns
-    except ImportError:  # pragma: no cover
-        return None
-
-
-@contextmanager
-def _style(style: str = "whitegrid", context: str = "notebook"):
-    """Apply a plotting theme *temporarily*.
-
-    The original library called ``sns.set()`` at import-adjacent scope,
-    which silently restyles every other figure in the user's session.
-    """
-    sns = _sns()
-    if sns is None:
-        yield
-        return
-    with sns.axes_style(style), sns.plotting_context(context):
-        yield
-
-
-def _finish(fig, show: bool, tight: bool = True):
-    plt = _plt()
-    if tight:
-        try:
-            fig.tight_layout()
-        except Exception:
-            pass
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
+DEFAULT_PALETTE = PALETTE          # kept as an alias for existing call sites
 
 
 def _numeric_cols(df: Frame, columns=None) -> List[str]:
