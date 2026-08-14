@@ -33,6 +33,7 @@ License: MIT
 
 from __future__ import annotations
 
+import os
 import re
 import warnings
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
@@ -702,6 +703,170 @@ def fix_outliers(
     return (out, state) if return_state else out
 
 
+def scan_outliers_multivariate(
+    df: Frame,
+    columns=None,
+    method: Literal["isolation_forest", "lof", "elliptic", "mahalanobis"] = "isolation_forest",
+    contamination: float = 0.03,
+    n_neighbors: int = 20,
+    scale: bool = True,
+    random_state: int = 42,
+    return_state: bool = False,
+):
+    """Score every row for how anomalous it is across several columns at once.
+
+    Univariate rules miss the interesting cases. A 45-year-old is ordinary;
+    a 45-year-old with a gestational age of 24 weeks and a birth weight of
+    4 kg is not, and no single-column bound will flag it. These four methods
+    all work on the joint distribution.
+
+    Methods
+    -------
+    ``isolation_forest``  random splits; rows that separate in few splits
+                          are outliers. Fast, handles many columns, makes no
+                          distributional assumption. The default.
+    ``lof``               local outlier factor: compares a row's local
+                          density to its neighbours'. Finds outliers that
+                          sit inside the overall cloud but in a sparse
+                          pocket -- the ones isolation forest can miss.
+    ``elliptic``          robust Gaussian fit; only sensible when the data
+                          really are roughly elliptical.
+    ``mahalanobis``       distance from the robust centre in covariance
+                          units, with a chi-squared cut-off. Interpretable
+                          and gives a per-row distance you can rank.
+
+    Parameters
+    ----------
+    contamination : float, default 0.03
+        Expected share of outliers. This is an *assumption you are making*,
+        not something the method discovers -- set it to 0.10 and it will
+        dutifully flag 10% of rows. Check ``score`` before trusting the flag.
+    scale : bool, default True
+        Standardise first. Without it, whichever column has the largest
+        units dominates every distance and the result is about your units,
+        not your data.
+
+    Returns
+    -------
+    DataFrame with the original index plus ``outlier_score`` (higher =
+    more anomalous), ``is_outlier``, and the per-column z-scores of the
+    flagged rows so you can see *why* each one was flagged. With
+    ``return_state=True`` also returns a replayable state.
+
+    >>> flags, st = dp.scan_outliers_multivariate(train, return_state=True)
+    >>> flags[flags.is_outlier].head()
+    >>> test_flags = dp.apply_state(test, st)          # same fitted model
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    cols = [c for c in (columns or df.columns)
+            if pd.api.types.is_numeric_dtype(df[c])
+            and not pd.api.types.is_bool_dtype(df[c])]
+    if len(cols) < 2:
+        raise ValueError(
+            f"Multivariate detection needs at least 2 numeric columns, got {cols}. "
+            f"For a single column use fix_outliers(method='iqr'|'mad'), which is "
+            f"faster and exactly equivalent in one dimension."
+        )
+
+    X = df[cols].to_numpy(dtype=float)
+    nan_rows = np.isnan(X).any(axis=1)
+    if nan_rows.any():
+        warnings.warn(f"{int(nan_rows.sum())} row(s) contain NaN and cannot be "
+                      f"scored; they are returned with score=NaN, is_outlier=False. "
+                      f"Impute first with fix_missing() to include them.",
+                      stacklevel=2)
+    Xc = X[~nan_rows]
+    if len(Xc) < 10:
+        raise ValueError("Fewer than 10 complete rows; nothing to fit.")
+
+    scaler = StandardScaler().fit(Xc) if scale else None
+    Xs = scaler.transform(Xc) if scale else Xc
+
+    score = np.full(len(df), np.nan)
+    flag = np.zeros(len(df), dtype=bool)
+    model = None
+
+    if method == "isolation_forest":
+        from sklearn.ensemble import IsolationForest
+        model = IsolationForest(contamination=contamination, n_estimators=300,
+                                random_state=random_state).fit(Xs)
+        score[~nan_rows] = -model.score_samples(Xs)
+        flag[~nan_rows] = model.predict(Xs) == -1
+
+    elif method == "lof":
+        from sklearn.neighbors import LocalOutlierFactor
+        model = LocalOutlierFactor(n_neighbors=min(n_neighbors, len(Xs) - 1),
+                                   contamination=contamination, novelty=True).fit(Xs)
+        score[~nan_rows] = -model.score_samples(Xs)
+        flag[~nan_rows] = model.predict(Xs) == -1
+
+    elif method == "elliptic":
+        from sklearn.covariance import EllipticEnvelope
+        model = EllipticEnvelope(contamination=contamination,
+                                 random_state=random_state).fit(Xs)
+        score[~nan_rows] = -model.score_samples(Xs)
+        flag[~nan_rows] = model.predict(Xs) == -1
+
+    elif method == "mahalanobis":
+        from scipy.stats import chi2
+        from sklearn.covariance import MinCovDet
+        model = MinCovDet(random_state=random_state).fit(Xs)
+        d2 = model.mahalanobis(Xs)
+        score[~nan_rows] = d2
+        cutoff = chi2.ppf(1 - contamination, df=len(cols))
+        flag[~nan_rows] = d2 > cutoff
+
+    else:
+        raise ValueError("method must be isolation_forest, lof, elliptic or mahalanobis.")
+
+    out = pd.DataFrame({"outlier_score": score, "is_outlier": flag}, index=df.index)
+    z = pd.DataFrame(np.nan, index=df.index, columns=[f"z_{c}" for c in cols])
+    if scale:
+        z.loc[~nan_rows, :] = Xs
+    else:
+        z.loc[~nan_rows, :] = StandardScaler().fit_transform(Xc)
+    out = pd.concat([out, z.round(2)], axis=1)
+
+    driver = z.abs().idxmax(axis=1)
+    out["main_driver"] = driver.str[2:].where(out["is_outlier"], "")
+    out.attrs["n_flagged"] = int(flag.sum())
+    out.attrs["pct_flagged"] = round(float(flag.mean() * 100), 2)
+    out.attrs["columns"] = cols
+
+    state = {"kind": "outliers_mv", "columns": cols, "method": method,
+             "model": model, "scaler": scaler, "contamination": contamination}
+    return (out, state) if return_state else out
+
+
+def fix_outliers_multivariate(
+    df: Frame,
+    columns=None,
+    method: Literal["isolation_forest", "lof", "elliptic", "mahalanobis"] = "isolation_forest",
+    contamination: float = 0.03,
+    action: Literal["drop", "flag"] = "flag",
+    **kwargs,
+) -> Frame:
+    """Drop or flag multivariate outliers.
+
+    ``action="flag"`` (the default) adds ``is_outlier`` and
+    ``outlier_score`` columns and changes nothing else -- almost always the
+    right first move, because dropping rows is irreversible and, on
+    imbalanced data, disproportionately deletes the minority class. Check
+    what would go before you let it go.
+    """
+    flags = scan_outliers_multivariate(df, columns, method=method,
+                                       contamination=contamination, **kwargs)
+    if action == "flag":
+        out = df.copy()
+        out["is_outlier"] = flags["is_outlier"].to_numpy()
+        out["outlier_score"] = flags["outlier_score"].to_numpy()
+        return out
+    if action == "drop":
+        return df.loc[~flags["is_outlier"].to_numpy()].copy()
+    raise ValueError("action must be 'drop' or 'flag'.")
+
+
 def fix_missing(
     df: Frame,
     columns=None,
@@ -883,6 +1048,29 @@ def apply_state(df: Frame, state: Dict[str, Any]) -> Frame:
         for c, val in state.get("other", {}).items():
             if c in out.columns and val is not None:
                 out[c] = out[c].fillna(val)
+        return out
+
+    if kind == "outliers_mv":
+        cols = state["columns"]
+        missing = [c for c in cols if c not in out.columns]
+        if missing:
+            raise KeyError(f"apply_state: outlier detector needs columns {missing}")
+        X = out[cols].to_numpy(dtype=float)
+        ok = ~np.isnan(X).any(axis=1)
+        flag = np.zeros(len(out), dtype=bool)
+        score = np.full(len(out), np.nan)
+        if ok.any():
+            Xs = state["scaler"].transform(X[ok]) if state["scaler"] is not None else X[ok]
+            if state["method"] == "mahalanobis":
+                from scipy.stats import chi2
+                d2 = state["model"].mahalanobis(Xs)
+                score[ok] = d2
+                flag[ok] = d2 > chi2.ppf(1 - state["contamination"], df=len(cols))
+            else:
+                score[ok] = -state["model"].score_samples(Xs)
+                flag[ok] = state["model"].predict(Xs) == -1
+        out["is_outlier"] = flag
+        out["outlier_score"] = score
         return out
 
     if kind == "rare":
@@ -1711,7 +1899,64 @@ def compare_balance(
 
 
 # ======================================================================
-#  5. SPLIT
+#  5. IO
+# ======================================================================
+
+def save_table(
+    df: Frame,
+    path: str,
+    fmt: Optional[Literal["csv", "excel", "parquet", "json"]] = None,
+    index: bool = False,
+    make_dirs: bool = True,
+    **kwargs,
+) -> str:
+    """Write a DataFrame to disk, inferring the format from the extension.
+
+    Generalises ``save_outliers``: the original hardcoded csv/excel, refused
+    to create the directory, and rejected empty frames -- but an empty
+    result is often exactly what you want to record ("no outliers found"),
+    so here it only warns.
+
+    Returns the absolute path written.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame.")
+    if df.empty:
+        warnings.warn("Saving an empty DataFrame.", stacklevel=2)
+
+    if fmt is None:
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        fmt = {"csv": "csv", "tsv": "csv", "xlsx": "excel", "xls": "excel",
+               "parquet": "parquet", "pq": "parquet", "json": "json"}.get(ext)
+        if fmt is None:
+            raise ValueError(f"Cannot infer format from '{path}'. Pass fmt= "
+                             f"explicitly (csv, excel, parquet, json).")
+
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory and not os.path.exists(directory):
+        if make_dirs:
+            os.makedirs(directory, exist_ok=True)
+        else:
+            raise FileNotFoundError(f"Directory does not exist: {directory}")
+
+    writer = {"csv": df.to_csv, "excel": df.to_excel,
+              "parquet": df.to_parquet, "json": df.to_json}[fmt]
+    try:
+        if fmt == "json":
+            writer(path, orient=kwargs.pop("orient", "records"), **kwargs)
+        else:
+            writer(path, index=index, **kwargs)
+    except ImportError as exc:
+        engine = {"parquet": "pyarrow", "excel": "openpyxl"}.get(fmt, fmt)
+        raise ImportError(
+            f"Writing {fmt} needs an extra package. Install it with: "
+            f"pip install {engine}   (or save as .csv instead)"
+        ) from exc
+    return os.path.abspath(path)
+
+
+# ======================================================================
+#  6. SPLIT
 # ======================================================================
 
 def split(
@@ -1766,16 +2011,19 @@ __all__ = [
     # inspect
     "overview", "scan_missing", "scan_duplicates", "scan_outliers",
     "check_numeric", "scan_leakage", "column_types",
+    "scan_outliers_multivariate",
     # clean
     "clean_names", "convert", "drop_missing", "drop_constant",
-    "fix_missing", "fix_duplicates", "fix_outliers", "group_rare",
-    "apply_state",
+    "fix_missing", "fix_duplicates", "fix_outliers", "fix_outliers_multivariate",
+    "group_rare", "apply_state",
     # features
     "select_features", "drop_correlated",
     # balance
     "balance", "balance_pipeline", "class_weights", "prior_correct",
     "tune_threshold", "compare_balance", "list_methods", "BALANCE_METHODS",
     "NUMERIC_ONLY_METHODS",
+    # io
+    "save_table",
     # split
     "split",
 ]
