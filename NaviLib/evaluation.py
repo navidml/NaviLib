@@ -47,52 +47,17 @@ __version__ = "2.0.0"
 Frame = pd.DataFrame
 ArrayLike = Union[np.ndarray, pd.Series, Sequence]
 
-PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52",
-           "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
-GOOD, BAD, NEUTRAL = "#55A868", "#C44E52", "#8C8C8C"
 
 
 # ----------------------------------------------------------------------
 # infrastructure
 # ----------------------------------------------------------------------
 
-def _plt():
-    import matplotlib.pyplot as plt
-    return plt
-
-
-def _sns():
-    try:
-        import seaborn as sns
-        return sns
-    except ImportError:  # pragma: no cover
-        return None
-
-
-@contextmanager
-def _style(style: str = "whitegrid"):
-    """Scoped plotting theme -- never mutates the caller's rcParams."""
-    sns = _sns()
-    if sns is None:
-        yield
-        return
-    with sns.axes_style(style):
-        yield
-
-
-def _finish(fig, show: bool):
-    plt = _plt()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        try:
-            fig.tight_layout()
-        except Exception:
-            pass
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
+# Shared helpers live in _common so a fix lands once, not three times.
+try:                                    # inside the package
+    from ._common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
+except ImportError:                     # running the file standalone
+    from _common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
 
 
 def _as_array(x: ArrayLike, name: str = "input") -> np.ndarray:
