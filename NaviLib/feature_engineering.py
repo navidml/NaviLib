@@ -43,6 +43,10 @@ import pandas as pd
 __version__ = "2.0.0"
 
 Frame = pd.DataFrame
+
+#: State kinds this module fits and can replay. Registered with the
+#: package-level dispatcher in ``navdata/__init__.py``.
+FEATURE_STATE_KINDS = ('transform', 'scale', 'bin', 'encode', 'datetime', 'cyclical', 'interactions', 'aggregates', 'text')
 Series = pd.Series
 
 TRANSFORMS = ["none", "log", "log1p", "sqrt", "cuberoot", "reciprocal",
@@ -1122,13 +1126,20 @@ def add_text_features(
 #  6. REPLAY  --  the whole point of the module
 # ======================================================================
 
-def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -> Frame:
-    """Replay fitted feature engineering on new data.
+def _replay(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -> Frame:
+    """Replay fitted feature engineering on new data (module-internal).
+
+    Prefer the package-level ``navdata.apply_state``, which accepts states
+    from any module in one list and routes each to its owner. This function
+    only understands the kinds listed in ``FEATURE_STATE_KINDS``.
 
     Accepts a single state or a list, applied in order.  Everything learned
     from the training set -- Box-Cox lambdas, scaler means, label maps,
     target-encoding tables, bin edges, group statistics -- is reused rather
     than refitted, which is what keeps the test set an honest test set.
+
+    A missing source column raises ``KeyError``; whether that is fatal is
+    decided by the package-level dispatcher's ``strict`` flag, not here.
 
     Unseen categories are handled explicitly per encoder: one-hot gives all
     zeros, count/frequency give 0, target and WOE fall back to the prior,
@@ -1139,7 +1150,7 @@ def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]
     """
     if isinstance(state, (list, tuple)):
         for st in state:
-            df = apply_state(df, st)
+            df = _replay(df, st)
         return df
 
     out = df.copy()
@@ -1149,9 +1160,9 @@ def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]
     if kind == "transform":
         for src, e in state["entries"].items():
             if src not in out.columns:
-                warnings.warn(f"apply_state: column '{src}' missing, skipped.",
-                              stacklevel=2)
-                continue
+                raise KeyError(
+                    f"source column '{src}' is not present in the new data"
+                )
             x = pd.to_numeric(out[src], errors="coerce")
             out[e["target_column"]] = _apply_transform_one(x, e["params"])
         return out
@@ -1188,9 +1199,9 @@ def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]
     if kind == "encode":
         for src, e in state["entries"].items():
             if src not in out.columns:
-                warnings.warn(f"apply_state: column '{src}' missing, skipped.",
-                              stacklevel=2)
-                continue
+                raise KeyError(
+                    f"source column '{src}' is not present in the new data"
+                )
             s = out[src]
             na_mask = s.isna()
             sv = s.astype("object").where(~na_mask, np.nan)
@@ -1240,9 +1251,10 @@ def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]
 
     # ---------------- datetime ----------------
     if kind == "datetime":
-        present = [c for c in state["columns"] if c in out.columns]
-        if not present:
-            return out
+        missing = [c for c in state["columns"] if c not in out.columns]
+        if missing:
+            raise KeyError(f"datetime source column(s) {missing} not in the new data")
+        present = state["columns"]
         out = add_datetime(out, present, parts=state["parts"],
                            cyclical=state["cyclical"], reference=state["reference"],
                            drop_original=state["drop_original"])
@@ -1257,10 +1269,10 @@ def apply_state(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]
                                 max_features=state["max_features"])
 
     if kind == "text":
-        present = [c for c in state["columns"] if c in out.columns]
-        if not present:
-            return out
-        return add_text_features(out, present, parts=state["parts"],
+        missing = [c for c in state["columns"] if c not in out.columns]
+        if missing:
+            raise KeyError(f"text source column(s) {missing} not in the new data")
+        return add_text_features(out, state["columns"], parts=state["parts"],
                                  drop_original=state["drop_original"])
 
     # ---------------- aggregates ----------------
@@ -1368,7 +1380,7 @@ __all__ = [
     "add_datetime", "add_cyclical", "add_interactions", "add_aggregates",
     "add_text_features",
     # replay & orchestration
-    "apply_state", "summary", "chain",
+    "summary", "chain",
     # constants
-    "TRANSFORMS", "SCALERS", "ENCODERS",
+    "TRANSFORMS", "SCALERS", "ENCODERS", "FEATURE_STATE_KINDS",
 ]
