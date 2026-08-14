@@ -9,6 +9,7 @@ Modules
 ``cleaning``             inspect, clean, balance, split
 ``eda``                  profile, relate, correlate, drift
 ``feature_engineering``  transform, scale, encode, bin, derive
+``modeling``             train, validate, tune, explain, ship
 ``evaluation``           score, plot, compare, interpret
 
 Two ways to use it
@@ -47,11 +48,11 @@ grows a new one.
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "Navid"
 
 # --- submodules -------------------------------------------------------
-from . import _common, cleaning, eda, evaluation, feature_engineering
+from . import _common, cleaning, eda, evaluation, feature_engineering, modeling
 
 # --- shared state machinery ------------------------------------------
 from ._common import (
@@ -98,6 +99,9 @@ _FLAT = {
           "compare_distributions", "report"],
     feature_engineering: ["transform_numeric", "scale", "encode", "bin_numeric",
                           "chain"],
+    modeling: ["ChainTransformer", "make_pipeline", "validate", "tune", "train",
+               "predict", "compare_algorithms", "explain", "save_model",
+               "load_model"],
     evaluation: ["score_classification", "score_regression", "compare_models",
                  "report_classification", "report_regression", "error_analysis",
                  "bootstrap_ci", "find_best_k"],
@@ -114,7 +118,7 @@ def help_map() -> "object":
     """
     import pandas as pd
     rows = []
-    for mod in (cleaning, eda, feature_engineering, evaluation):
+    for mod in (cleaning, eda, feature_engineering, modeling, evaluation):
         for name in getattr(mod, "__all__", []):
             obj = getattr(mod, name, None)
             if not callable(obj):
@@ -132,7 +136,7 @@ def help_map() -> "object":
 
 __all__ = [
     # submodules
-    "cleaning", "eda", "feature_engineering", "evaluation",
+    "cleaning", "eda", "feature_engineering", "modeling", "evaluation",
     # state machinery -- the reason this file exists
     "apply_state", "describe_states", "save_state", "load_state",
     "registered_kinds", "register_state_handler",
