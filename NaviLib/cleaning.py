@@ -53,6 +53,10 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 __version__ = "2.0.0"
 
 Frame = pd.DataFrame
+
+#: State kinds this module fits and can replay. Registered with the
+#: package-level dispatcher in ``navdata/__init__.py``.
+CLEANING_STATE_KINDS = ('missing', 'outliers', 'outliers_mv', 'rare')
 Series = pd.Series
 
 # ----------------------------------------------------------------------
@@ -997,8 +1001,12 @@ def fix_missing(
     return (out, state) if return_state else out
 
 
-def apply_state(df: Frame, state: Dict[str, Any]) -> Frame:
-    """Replay a fitted cleaning step on new data (test set, production).
+def _replay(df: Frame, state: Dict[str, Any]) -> Frame:
+    """Replay a fitted cleaning step on new data (module-internal).
+
+    Prefer the package-level ``navdata.apply_state``, which accepts states
+    from any module in one list and routes each to its owner. This function
+    only understands the kinds listed in ``CLEANING_STATE_KINDS``.
 
     Accepts a single ``state`` dict or a list of them, applied in order.
     This is what keeps your test set honest: the medians, bounds and
@@ -1009,7 +1017,7 @@ def apply_state(df: Frame, state: Dict[str, Any]) -> Frame:
     """
     if isinstance(state, (list, tuple)):
         for st in state:
-            df = apply_state(df, st)
+            df = _replay(df, st)
         return df
 
     out = df.copy()
@@ -2015,7 +2023,7 @@ __all__ = [
     # clean
     "clean_names", "convert", "drop_missing", "drop_constant",
     "fix_missing", "fix_duplicates", "fix_outliers", "fix_outliers_multivariate",
-    "group_rare", "apply_state",
+    "group_rare",
     # features
     "select_features", "drop_correlated",
     # balance
@@ -2024,6 +2032,8 @@ __all__ = [
     "NUMERIC_ONLY_METHODS",
     # io
     "save_table",
+    # state
+    "CLEANING_STATE_KINDS",
     # split
     "split",
 ]
