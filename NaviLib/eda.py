@@ -64,9 +64,9 @@ KURT_TOL = 0.5
 
 # Shared helpers live in _common so a fix lands once, not three times.
 try:                                    # inside the package
-    from .common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
+    from ._common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
 except ImportError:                     # running the file standalone
-    from common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
+    from _common import _finish, _plt, _sns, _style, PALETTE, GOOD, BAD, NEUTRAL
 
 DEFAULT_PALETTE = PALETTE          # kept as an alias for existing call sites
 
