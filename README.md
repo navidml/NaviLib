@@ -1,134 +1,310 @@
+<div align="center">
+
 # NaviLib
 
-کتابخانهٔ کمکی تحلیل داده و یادگیری ماشین برای داده‌های جدولی؛ با خروجی‌های قابل بررسی، پیش‌پردازش قابل بازاجرا، نمودارهای هماهنگ و گزارش HTML مستقل.
+### Know your data. Build with confidence.
+
+Readable, reproducible workflows for tabular analysis and machine learning.
+<br>
+From the first quality check to a fitted model and a report worth sharing.
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 or newer">
+  <img src="https://img.shields.io/badge/pandas-DataFrame%20native-150458?style=flat-square&logo=pandas&logoColor=white" alt="pandas DataFrame native">
+  <img src="https://img.shields.io/badge/scikit--learn-Compatible-F7931E?style=flat-square&logo=scikitlearn&logoColor=white" alt="scikit-learn compatible">
+  <img src="https://img.shields.io/badge/Reports-Offline%20HTML-0F766E?style=flat-square" alt="Offline HTML reports">
+</p>
+
+<p>
+  <a href="#installation">Install</a> &middot;
+  <a href="#quick-start">Quick start</a> &middot;
+  <a href="#from-data-to-model">Modeling workflow</a> &middot;
+  <a href="docs/API.md">API reference</a> &middot;
+  <a href="examples/walkthrough.py">Full example</a>
+</p>
+
+</div>
+
+---
+
+NaviLib brings data cleaning, exploration, feature engineering, statistical testing, modeling, and evaluation into one Python library. Work with familiar pandas DataFrames, inspect the results of each step, and reuse fitted preprocessing when new data arrives.
+
+Built on NumPy, pandas, SciPy, scikit-learn, Matplotlib, Seaborn, and statsmodels, it fits naturally into notebooks and Python scripts.
+
+## Why NaviLib?
+
+- **Understand the data first.** Inspect missing values, duplicates, suspicious columns, and label quality with suggested next steps.
+- **Keep preprocessing reproducible.** Capture fitted transformations, inspect their state, and replay them on validation or production data.
+- **Bring preprocessing into validation.** Use `ChainTransformer` with scikit-learn pipelines to fit learned transformations within each fold.
+- **Keep results accessible.** Work directly with DataFrames, dictionaries, and Matplotlib figures for further analysis or export.
+- **Make analysis look consistent.** Apply `light`, `dark`, or `paper` themes across NaviLib charts and styled tables.
+- **Share a complete report.** Export standalone HTML with embedded figures and styles that opens offline.
+
+## Installation
+
+Requires **Python 3.10 or newer**. Download or clone this repository, open a terminal in its root directory, and run:
 
 ```bash
-python -m pip install ".[dev,notebook]"
+python -m pip install .
 ```
 
-این دستور را داخل پوشهٔ پروژه اجرا کنید. Python 3.10 یا جدیدتر لازم است. نام توزیع `NaviLib` و نام import نیز دقیقاً `NaviLib` است؛ مثال‌های قدیمی با نام `navdata` یا `datakit` مربوط به این پکیج نیستند.
+The distribution and import name are both **`NaviLib`**:
+
+```python
+import NaviLib as nv
+```
+
+Add optional capabilities as needed:
+
+| Extra | Install from the repository root | Adds |
+| :--- | :--- | :--- |
+| Notebook | `python -m pip install ".[notebook]"` | Jinja2 for styled pandas tables |
+| Data I/O | `python -m pip install ".[io]"` | Excel and Parquet dependencies |
+| Class balancing | `python -m pip install ".[balance]"` | imbalanced-learn |
+| Explainability | `python -m pip install ".[explain]"` | SHAP |
+| Development | `python -m pip install -e ".[dev,notebook]"` | Editable install, testing, and build tools |
+
+Extras can be combined, for example: `python -m pip install ".[notebook,io]"`.
+
+## Quick start
+
+Turn a DataFrame into a quality review and a shareable report:
 
 ```python
 import pandas as pd
 import NaviLib as nv
 
-df = pd.DataFrame({
-    "age": [24, 31, None, 42, 29],
-    "city": ["Tehran", "Shiraz", "Tehran", "Tabriz", "Shiraz"],
+customers = pd.DataFrame({
+    "age": [24, 31, None, 42, 29, 35],
+    "city": ["Tehran", "Shiraz", "Tehran", "Tabriz", "Shiraz", "Tabriz"],
+    "spend": [120.0, 85.5, 210.0, 160.0, None, 95.0],
 })
 
 nv.set_theme("light")
-issues = nv.audit_data(df)
-report = nv.create_report(df, title="Customer data review")
-report.to_html("outputs/report.html")
 
-nv.help_map("missing")       # جست‌وجوی تابع، امضا، توضیح و نام جایگزین
-help(nv.impute_missing)      # راهنمای پارامترها و خروجی
+issues = nv.audit_data(customers)
+print(issues)
+
+report = nv.create_report(customers, title="Customer data overview")
+report.to_html("outputs/customer_report.html")
 ```
 
-گزارش HTML بدون اینترنت باز می‌شود و شامل جدول‌های کیفیت، پیشنهاد اقدام، آمار توصیفی و نمودار است. دادهٔ خام را تغییر نمی‌دهد. جدول‌های کامل در `report.tables` و شکل‌ها در `report.figures` در دسترس‌اند؛ نمایش HTML تعداد ردیف‌ها را محدود می‌کند. گزارش، داده و نمودارهای تعبیه‌شده را در خود دارد؛ فایل نمونهٔ این پروژه فقط از دادهٔ ساختگی استفاده می‌کند.
+Open `outputs/customer_report.html` in your browser. The report includes dataset summary cards, quality findings, suggested actions, descriptive tables, and plots, without changing the source DataFrame.
 
-## مسیرهای اصلی
+**The report stays useful beyond HTML.** Full analysis tables are available in `report.tables`, and reusable figure handles are in `report.figures`. Tables use all rows; plots use a reproducible sample of up to 5,000 rows by default. Profiles cover up to 12 columns per type by default, while quality checks cover every column.
 
-| ماژول | کاربرد |
-|---|---|
-| `cleaning` | بررسی داده، نام ستون‌ها، مقادیر گمشده، پرت‌ها، تکرارها، تقسیم و توازن کلاس‌ها |
-| `eda` | آمار توصیفی، ارتباط ویژگی و هدف، همبستگی، تغییر توزیع و نمودارها |
-| `feature_engineering` | تبدیل عددی، مقیاس‌بندی، کدگذاری، بازه‌بندی، ویژگی تاریخ و متن و تعامل‌ها |
-| `statistical_tests` | آزمون‌های پارامتریک و ناپارامتریک، اثر، همبستگی و اصلاح آزمون‌های متعدد |
-| `modeling` | پایپ‌لاین، اعتبارسنجی، جست‌وجوی پارامتر، آموزش، توضیح و ذخیرهٔ مدل |
-| `evaluation` | ارزیابی طبقه‌بندی، رگرسیون، خوشه‌بندی و رتبه‌بندی |
-| `quality` | بررسی کیفیت با پیشنهاد اقدام و کنترل ساختار دادهٔ ورودی |
-| `timeseries` | تقسیم زمانی با فاصله و ویژگی‌های تأخیری و پنجره‌ای |
-| `theme` / `reporting` | تم مشترک، جدول notebook و گزارش HTML |
+## Explore the toolkit
 
-فهرست کامل، امضای توابع و راهنمای پارامترها در [مرجع API](docs/API.md) موجود است. [راهنمای مهاجرت](docs/MIGRATION.md)، [گزارش بررسی](docs/REVIEW_FA.md) و [مثال اجرایی](examples/walkthrough.py) نیز همراه پروژه‌اند.
+| Module | What you can do |
+| :--- | :--- |
+| `cleaning` | Profile columns, handle missing values and outliers, remove duplicates, split datasets, and balance classes. |
+| `eda` | Explore distributions, correlations, feature–target relationships, and differences between datasets. |
+| `feature_engineering` | Transform and scale numeric features, encode categories, bin values, and create date, text, and interaction features. |
+| `statistical_tests` | Run parametric and nonparametric tests, examine effect sizes and correlations, and adjust multiple p-values. |
+| `modeling` | Build pipelines, cross-validate, tune parameters, compare algorithms, train, explain, and persist models. |
+| `evaluation` | Evaluate classification, regression, clustering, ranking, and recommender outputs. |
+| `quality` | Audit data with suggested actions, infer a reference schema, and validate incoming datasets. |
+| `timeseries` | Split chronologically and create grouped lag and rolling features. |
+| `theme` | Coordinate chart colors, typography, and notebook table styling. |
+| `reporting` | Create reusable report objects and export standalone HTML. |
 
-## پیش‌پردازش قابل بازاجرا
+Common operations are available directly as `nv.function_name(...)`. Specialist tools remain organized under their modules, such as `nv.eda.plot_distribution(...)`.
 
-ابتدا داده را تقسیم کنید. پارامترهای یادگرفتنی را فقط روی آموزش یاد بگیرید و همان state را روی آزمون اجرا کنید.
+## From data to model
 
-```python
-from NaviLib import cleaning as cl, feature_engineering as fe
-
-train, test = nv.split_data(labeled_df, target="label")
-X_train, y_train = train.drop(columns="label"), train["label"]
-X_test = test.drop(columns="label")
-
-prepared, states = fe.chain(X_train, [
-    (nv.impute_missing, {"method": "median"}),
-    (nv.encode_categorical, {"columns": ["city"], "method": "onehot"}),
-    (nv.scale_features, {"columns": ["age"]}),
-])
-prepared_test = nv.apply_state(X_test, states)
-nv.describe_states(states)
-nv.save_state(states, "outputs/preprocessing.joblib")
-```
-
-برای اعتبارسنجی متقاطع، خود پیش‌پردازش باید داخل پایپ‌لاین باشد. `ChainTransformer` ستون هدف را از مراحل غیرنظارتی دور نگه می‌دارد و مراحل حذف‌کنندهٔ ردیف را رد می‌کند. روش‌های آماری خودکار و ویژگی‌های هدف‌محور همچنان نیاز به انتخاب درست تقسیم‌ها دارند؛ کدگذاری هدف/WOE درون خود از دورهای تصادفی استفاده می‌کند و برای وابستگی‌های زمانی یا گروهی تضمین ویژه‌ای ندارد.
+This self-contained example creates synthetic classification data, introduces missing values, and trains a pipeline with preprocessing inside cross-validation.
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_classification
 from sklearn.linear_model import LogisticRegression
+import NaviLib as nv
 
-prep = nv.ChainTransformer([
+# Create a reproducible dataset; no download required.
+features, labels = make_classification(
+    n_samples=400,
+    n_features=4,
+    n_informative=3,
+    n_redundant=0,
+    random_state=42,
+)
+data = pd.DataFrame(features, columns=["a", "b", "c", "d"])
+data.loc[::17, "a"] = float("nan")
+data["label"] = labels
+
+# Reserve the test set before fitting any transformations.
+train, test = nv.split_data(data, target="label", random_state=42)
+X_train, y_train = train.drop(columns="label"), train["label"]
+X_test, y_test = test.drop(columns="label"), test["label"]
+
+steps = [
     (nv.impute_missing, {"method": "median"}),
-    (nv.encode_categorical, {"columns": ["city"]}),
-    (nv.scale_features, {"columns": ["age"]}),
-])
-pipeline = nv.make_pipeline(prep, LogisticRegression(max_iter=1000))
+    (nv.scale_features, {"method": "standard"}),
+]
+pipeline = nv.make_pipeline(
+    nv.ChainTransformer(steps),
+    LogisticRegression(max_iter=1000, random_state=42),
+)
+
 validation = nv.cross_validate_model(
     pipeline, X_train, y_train, cv=5, n_jobs=1, verbose=False,
 )
+
 artifact = nv.train_model(pipeline, X_train, y_train, verbose=False)
 predictions = nv.predict_model(artifact, X_test)
-nv.save_model(artifact, "outputs/model.joblib")
-reloaded_predictions = nv.predict_model(nv.load_model("outputs/model.joblib"), X_test)
+metrics = nv.score_classification(
+    y_test, predictions["prediction"], predictions["probability"],
+)
+print(metrics)
+
+# Save the fitted pipeline and its evaluation together.
+nv.save_model(artifact, "outputs/model.joblib", metrics=metrics)
+restored = nv.load_model("outputs/model.joblib")
+restored_predictions = nv.predict_model(restored, X_test)
 ```
 
-`cv` باید با تعداد نمونه‌های کوچک‌ترین کلاس سازگار باشد. برای تکرارهای یک فرد/گروه، `groups=` بدهید؛ برای دادهٔ زمانی از splitter زمانی استفاده کنید. خروجی OOF فقط وقتی ساخته می‌شود که هر ردیف دقیقاً یک بار در مجموعهٔ اعتبارسنجی قرار بگیرد. `task="auto"` یک تشخیص ابتکاری است؛ برای رگرسیون با مقادیر صحیح محدود، `task="regression"` را صریح بنویسید.
+Keep labels in `y`, separate from predictor columns. For grouped observations, pass `groups=` to cross-validation; for temporal data, use a time-aware splitter. Choose a fold count supported by your smallest class, and set `task="regression"` explicitly when an integer-valued target represents a regression problem.
 
-## نمودار و جدول
+### Fit once, replay on new data
+
+For preprocessing outside a model pipeline, use `chain` to collect fitted states and `apply_state` to reuse them. Continuing with `X_train`, `X_test`, and `steps` from the example above:
 
 ```python
+prepared_train, states = nv.chain(X_train, steps)
+prepared_test = nv.apply_state(X_test, states)
+
+print(nv.describe_states(states))
+
+nv.save_state(states, "outputs/preprocessing.joblib")
+restored_states = nv.load_state("outputs/preprocessing.joblib")
+prepared_again = nv.apply_state(X_test, restored_states)
+```
+
+Use this pattern for a fixed training/test split or incoming batches. For cross-validation, keep learned preprocessing inside `ChainTransformer` so each fold fits its own transformations.
+
+## Give your analysis a consistent look
+
+Choose a theme for subsequent NaviLib figures, or apply one temporarily to a single part of your analysis:
+
+```python
+# Uses the customers DataFrame from the quick start.
 nv.set_theme("dark", font_scale=1.1)
-figure = nv.eda.plot_distribution(df, columns="age", kind="hist", show=False)
-figure.savefig("distribution.png", dpi=200, bbox_inches="tight")
+
+figure = nv.eda.plot_distribution(
+    customers, columns="spend", kind="hist", show=False,
+)
+figure.savefig("spend_distribution.png", dpi=200, bbox_inches="tight")
 
 with nv.theme_context("paper", palette=["#0072B2", "#E69F00", "#009E73"]):
-    figure = nv.eda.plot_categorical(df, "city", show=False)
+    figure = nv.eda.plot_categorical(customers, "city", show=False)
 
-styled = nv.style_table(nv.audit_data(df), caption="Quality review")
+# Requires the notebook extra; display this object in a notebook.
+styled = nv.style_table(nv.audit_data(customers), caption="Data quality review")
 ```
 
-تم‌های `light`، `dark` و `paper` ارائه می‌شوند؛ `palette`، `font_scale` و `rc` قابل تنظیم‌اند. انتخاب تم فقط روی خروجی‌های بعدی NaviLib اثر دارد و `matplotlib.rcParams` را بیرون فراخوانی نمودار تغییر نمی‌دهد. نقشه‌های رنگی با معنای خاص، مانند همبستگی مثبت/منفی، رنگ‌بندی معنایی خود را حفظ می‌کنند. `show=False` شکل را از pyplot می‌بندد اما شیء Figure برای ذخیره در دسترس می‌ماند. آزمون‌های آماری قدیمی از `show_plot` استفاده می‌کنند و هندل شکل‌ها را در کلید `figures` می‌دهند؛ `show_plot=False` ساخت نمودار آن آزمون‌ها را غیرفعال می‌کند.
+| Theme | Intended use |
+| :--- | :--- |
+| `light` | Everyday exploration and reports |
+| `dark` | Analysis on dark backgrounds |
+| `paper` | Print-friendly charts and figures |
 
-## قابلیت‌های کیفیت و زمان
+Customize the palette, font scale, and Matplotlib settings through `palette`, `font_scale`, and `rc`. Themes apply to subsequent NaviLib output, with Matplotlib settings scoped to plotting calls. Figures returned with `show=False` remain available for saving.
+
+## More workflows
+
+<details>
+<summary><strong>Check incoming data against a reference schema</strong></summary>
+
+Infer a schema from your reference dataset, then inspect changes in an incoming batch:
 
 ```python
-schema = nv.infer_schema(reference_df)
-changes = nv.validate_schema(incoming_df, schema)
-issues = nv.audit_data(incoming_df, target="label")
+schema = nv.infer_schema(customers)
+incoming = customers.copy()
+incoming["channel"] = "web"
 
-train, test = nv.temporal_split(events, "timestamp", test_size=.2, gap=2)
-lagged = nv.add_lag_features(events, "sales", time="timestamp", group_by="store", lags=[1, 7])
-rolling = nv.add_rolling_features(events, "sales", time="timestamp", group_by="store", windows=[7])
-
-adjusted = nv.statistical_tests.adjust_pvalues([.001, .03, .2], method="fdr_bh")
+changes = nv.validate_schema(incoming, schema)
+print(changes)
 ```
 
-`gap` بر حسب تعداد زمان‌های متمایز است؛ lag و window بر حسب تعداد مشاهده هستند. تاریخ‌های رشته‌ای را ابتدا با `pd.to_datetime` تبدیل کنید. زمان تکراری در یک گروه برای ساخت ویژگی رد می‌شود تا ترتیب مبهم نباشد. برای محاسبهٔ ویژگی یک batch، تاریخچهٔ در دسترس آن را همراهش بدهید؛ این توابع آیندهٔ ناشناخته را پیش‌بینی نمی‌کنند. ساختار داده از روی نمونهٔ مرجع استنباط می‌شود و جای قرارداد دامنهٔ شما را نمی‌گیرد. یافته‌های کیفیت پیشنهاد بررسی‌اند، نه دستور حذف خودکار.
+Schema inference captures properties of the reference sample. You can use the resulting checks alongside your domain-specific data requirements.
 
-## نصب اختیاری و توسعه
+</details>
+
+<details>
+<summary><strong>Build features from ordered observations</strong></summary>
+
+```python
+events = pd.DataFrame({
+    "timestamp": pd.date_range("2025-01-01", periods=30, freq="D"),
+    "store": ["A"] * 30,
+    "sales": [20 + (day % 7) * 3 for day in range(30)],
+})
+
+train, test = nv.temporal_split(events, "timestamp", test_size=0.2, gap=2)
+lagged = nv.add_lag_features(
+    events, "sales", time="timestamp", group_by="store", lags=[1, 7],
+)
+rolling = nv.add_rolling_features(
+    events, "sales", time="timestamp", group_by="store", windows=[7],
+)
+```
+
+`gap` counts distinct timestamps; lags and windows count observations. Rolling features exclude the current row. Use numeric or datetime ordering columns, with unique timestamps within each group, and include only history available at prediction time.
+
+</details>
+
+<details>
+<summary><strong>Find the right function from Python</strong></summary>
+
+```python
+nv.help_map()              # Browse the API catalog.
+nv.help_map("missing")     # Search functions by purpose.
+help(nv.impute_missing)    # Inspect parameters and return values.
+```
+
+The catalog includes module names, signatures, summaries, and compatibility aliases.
+
+</details>
+
+## Documentation and examples
+
+| Resource | What you will find |
+| :--- | :--- |
+| [API reference](docs/API.md) | Function signatures, parameters, return values, and usage notes |
+| [Migration guide](docs/MIGRATION.md) | Preferred names, compatibility aliases, and behavior changes in 0.5 |
+| [Executable walkthrough](examples/walkthrough.py) | Synthetic data, model evaluation, and HTML reports in all three themes |
+
+After installation, run the complete walkthrough from the repository root:
 
 ```bash
-python -m pip install ".[balance]"    # imbalanced-learn
-python -m pip install ".[explain]"    # SHAP
-python -m pip install ".[io]"         # Excel و Parquet
-python -m pip install ".[notebook]"   # جدول‌های pandas Styler
-python -m pytest -q
-python -m build
-python tools/build_docs.py
 python examples/walkthrough.py
 ```
 
-فایل‌های مدل و state با joblib ذخیره می‌شوند؛ فقط فایل مورد اعتماد را بارگذاری کنید. سازگاری میان نسخه‌های مختلف scikit-learn تضمین نمی‌شود. این کتابخانه ابزار کمکی تحلیل و مدل‌سازی است؛ مدل زبانی یا سرویس هوش مصنوعی مولد داخلی ندارد.
+It writes reports, charts, cross-validation results, and metrics to `examples/output/`.
+
+### Practical notes
+
+- Quality findings suggest what to investigate; review them in the context of your dataset.
+- Target and WOE encoding use internal randomized folds. Grouped and temporal problems need additional care when choosing these transformations.
+- HTML reports contain dataset-derived values and embedded figures. Review their contents before sharing.
+- Model and preprocessing files use joblib. Load only trusted artifacts and preserve a compatible dependency environment for reuse.
+
+## Development
+
+Install the development extras, then run the checks or regenerate the API reference:
+
+```bash
+python -m pip install -e ".[dev,notebook]"
+python -m pytest -q
+python -m build
+python tools/build_docs.py
+```
+
+For a bug report, include a minimal reproducible example, your Python and NaviLib versions, and the expected behavior. Small synthetic datasets make examples easier to reproduce and share.
+
+---
+
+<div align="center">
+  <strong>NaviLib</strong><br>
+  Understand the data. Reproduce the workflow. Share the results.
+</div>
