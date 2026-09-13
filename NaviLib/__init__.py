@@ -1,58 +1,37 @@
-"""
-navdata
-~~~~~~~
+"""NaviLib: practical tabular analysis and machine-learning workflows.
 
-A practical toolkit for tabular data work, from raw file to evaluated model.
+Use namespaced modules for specialist functions, and the flat namespace for
+common operations. ``help_map(query)`` lists signatures, summaries and aliases.
 
-Modules
--------
-``cleaning``             inspect, clean, balance, split
-``eda``                  profile, relate, correlate, drift
-``feature_engineering``  transform, scale, encode, bin, derive
-``modeling``             train, validate, tune, explain, ship
-``evaluation``           score, plot, compare, interpret
+Examples
+--------
+>>> import NaviLib as nv
+>>> from NaviLib import cleaning, eda, modeling
+>>> catalog = nv.help_map("missing")
+>>> theme = nv.set_theme("light")
 
-Two ways to use it
-------------------
-Namespaced (recommended -- 87 function names is a lot to hold in your head,
-and the prefix tells you which stage of the pipeline you are in):
-
->>> from navdata import cleaning as cl, eda, feature_engineering as fe, evaluation as ev
->>> cl.overview(df)
->>> eda.relate(df, target="y")
-
-Or flat, for the handful of things you use constantly:
-
->>> import navdata as nv
->>> nv.overview(df); nv.split(df, "y"); nv.apply_state(test, states)
-
-The one function that lives here and nowhere else
--------------------------------------------------
-:func:`apply_state` replays a fitted preprocessing chain on new data.  It is
-defined at package level, not in a module, because a real chain mixes states
-from ``cleaning`` and ``feature_engineering`` and no single module can own
-them all:
-
->>> train, s1 = cl.fix_missing(train, method="median", return_state=True)
->>> train, s2 = fe.encode(train, ["city"], method="target", target="y",
-...                       return_state=True)
->>> train, s3 = fe.scale(train, target="y", return_state=True)
->>> test = nv.apply_state(test, [s1, s2, s3])     # routed to the right owner
->>> nv.describe_states([s1, s2, s3])              # what did I actually do?
->>> nv.save_state([s1, s2, s3], "artifacts/prep.joblib")
-
-Each module registers the state kinds it fits (see
-:func:`registered_kinds`), so nothing here needs updating when a module
-grows a new one.
+Fitted cleaning and feature states share a single dispatcher, ``apply_state``.
+Use ``ChainTransformer`` to refit learned preprocessing inside validation folds.
+The ``create_report`` function produces reusable tables, figures and offline HTML.
 """
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+from ._version import __version__
 __author__ = "Navid"
 
 # --- submodules -------------------------------------------------------
 from . import _common, cleaning, eda, evaluation, feature_engineering, modeling
+from . import quality, theme, timeseries, statistical_tests, reporting
+from .quality import audit_data, infer_schema, validate_schema, DataSchema
+from .theme import set_theme, get_theme, theme_context, available_themes, style_table
+from .timeseries import temporal_split, add_lag_features, add_rolling_features
+from .reporting import create_report, DataReport
+
+# A module alias supports old imports on case-sensitive and Windows filesystems.
+import sys as _sys
+_sys.modules[__name__ + ".Statistical_Tests"] = statistical_tests
+Statistical_Tests = statistical_tests
 
 # --- shared state machinery ------------------------------------------
 from ._common import (
@@ -109,16 +88,39 @@ _FLAT = {
 for _mod, _names in _FLAT.items():
     _reexport(_mod, _names)
 
+_STANDARD = {
+    cleaning: ["impute_missing", "drop_duplicates", "handle_outliers", "convert_columns",
+               "split_data", "resample_data"],
+    feature_engineering: ["scale_features", "encode_categorical", "add_datetime_features", "add_cyclical_features"],
+    modeling: ["cross_validate_model", "tune_model", "train_model", "predict_model"],
+}
+for _mod, _names in _STANDARD.items():
+    _reexport(_mod, _names)
 
-def help_map() -> "object":
+
+def help_map(query: str | None = None) -> "object":
     """Print what lives where -- the map of the whole package.
 
     Run this when you come back after three months and cannot remember
     which module holds which function.
+
+    Parameters
+    ----------
+    query : str | None, default None
+        Optional case-insensitive literal search across module, function and
+        summary text.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Searchable catalog with module, function, signature, summary, flat-
+        export and alias information.
     """
     import pandas as pd
+    import inspect
     rows = []
-    for mod in (cleaning, eda, feature_engineering, modeling, evaluation):
+    for mod in (cleaning, eda, feature_engineering, modeling, evaluation,
+                statistical_tests, quality, timeseries, theme, reporting):
         for name in getattr(mod, "__all__", []):
             obj = getattr(mod, name, None)
             if not callable(obj):
@@ -128,9 +130,15 @@ def help_map() -> "object":
                 "module": mod.__name__.rsplit(".", 1)[-1],
                 "function": name,
                 "flat": name in globals(),
-                "summary": doc[:70],
+                "summary": doc,
+                "signature": str(inspect.signature(obj)),
+                "alias_of": obj.__name__ if name != obj.__name__ else "",
             })
     df = pd.DataFrame(rows)
+    if query:
+        mask = df[["module", "function", "summary"]].apply(
+            lambda s: s.str.contains(query, case=False, regex=False)).any(axis=1)
+        df = df[mask]
     return df.sort_values(["module", "function"]).reset_index(drop=True)
 
 
@@ -142,4 +150,9 @@ __all__ = [
     "registered_kinds", "register_state_handler",
     # navigation
     "help_map", "PALETTE", "__version__",
-] + [n for names in _FLAT.values() for n in names]
+] + [n for names in _FLAT.values() for n in names] + [
+    n for names in _STANDARD.values() for n in names
+] + ["quality", "theme", "timeseries", "statistical_tests", "reporting",
+     "audit_data", "infer_schema", "validate_schema", "DataSchema",
+     "set_theme", "get_theme", "theme_context", "available_themes", "style_table",
+     "temporal_split", "add_lag_features", "add_rolling_features", "create_report", "DataReport"]

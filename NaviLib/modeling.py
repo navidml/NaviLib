@@ -1,5 +1,5 @@
 """
-navdata.modeling
+NaviLib.modeling
 ~~~~~~~~~~~~~~~~
 
 The middle of the pipeline: training, cross-validation, tuning,
@@ -12,11 +12,11 @@ Where this fits
 preprocessing must be refitted inside every cross-validation fold, or the
 score you report belongs to a model that has already seen its test data.
 
-:class:`ChainTransformer` is the bridge.  It wraps a navdata chain as a
+:class:`ChainTransformer` is the bridge.  It wraps a NaviLib chain as a
 scikit-learn transformer, so the same steps you ran interactively can be
 dropped into a ``Pipeline`` and refit per fold automatically:
 
->>> from navdata import modeling as md, feature_engineering as fe
+>>> from NaviLib import modeling as md, feature_engineering as fe
 >>> prep = md.ChainTransformer([
 ...     (fe.transform_numeric, {"columns": ["income"], "method": "auto"}),
 ...     (fe.encode, {"columns": ["city"], "method": "target", "target": "y"}),
@@ -86,7 +86,7 @@ _LOWER_IS_BETTER = {"brier", "rmse", "mae", "log_loss", "smape_pct"}
 
 def _infer_task(y) -> str:
     y = pd.Series(y)
-    if y.dtype == object or str(y.dtype) in ("category", "bool", "string"):
+    if pd.api.types.is_string_dtype(y.dtype) or y.dtype == object or str(y.dtype) in ("category", "bool", "string"):
         return "classification" if y.nunique() == 2 else "multiclass"
     if y.nunique() <= 2:
         return "classification"
@@ -106,9 +106,18 @@ def _make_cv(task: str, cv, y=None, groups=None, random_state: int = 42):
     return KFold(n, shuffle=True, random_state=random_state)
 
 
-def _resolve_scoring(task: str, scoring):
+def _resolve_scoring(task: str, scoring, y=None):
     if scoring is None:
-        return dict(DEFAULT_SCORING[task])
+        if task not in DEFAULT_SCORING:
+            raise ValueError(f"Unknown task {task!r}.")
+        result = dict(DEFAULT_SCORING[task])
+        if task == "classification" and y is not None:
+            from sklearn.metrics import make_scorer, f1_score, average_precision_score, brier_score_loss
+            pos = np.unique(np.asarray(y))[-1]
+            result["f1"] = make_scorer(f1_score, pos_label=pos, zero_division=0)
+            result["auprc"] = make_scorer(average_precision_score, response_method="predict_proba", pos_label=pos)
+            result["brier"] = make_scorer(brier_score_loss, response_method="predict_proba", pos_label=pos, greater_is_better=False)
+        return result
     if isinstance(scoring, str):
         return {scoring: scoring}
     if isinstance(scoring, (list, tuple)):
@@ -116,10 +125,14 @@ def _resolve_scoring(task: str, scoring):
     return dict(scoring)
 
 
+def _scorer_sign(scorer):
+    return getattr(scorer, "_sign", -1 if str(scorer).startswith("neg_") else 1)
+
+
 def _tidy(res: Dict[str, np.ndarray], scoring: Dict[str, Any]) -> Frame:
     rows = []
     for name in scoring:
-        sign = -1 if str(scoring[name]).startswith("neg_") else 1
+        sign = _scorer_sign(scoring[name])
         v = sign * res[f"test_{name}"]
         rows.append({
             "metric": name,
@@ -133,16 +146,16 @@ def _tidy(res: Dict[str, np.ndarray], scoring: Dict[str, Any]) -> Frame:
 
 
 # ======================================================================
-#  1. THE BRIDGE  --  navdata chains as scikit-learn transformers
+#  1. THE BRIDGE  --  NaviLib chains as scikit-learn transformers
 # ======================================================================
 
 class ChainTransformer(BaseEstimator, TransformerMixin):
-    """Wrap a navdata preprocessing chain as a scikit-learn transformer.
+    """Wrap a NaviLib preprocessing chain as a scikit-learn transformer.
 
     This is what makes leak-free cross-validation possible without giving
     up the state-based API.  On ``fit`` it runs the steps and captures
     their states; on ``transform`` it replays those states via
-    :func:`navdata.apply_state`.  Put it in a ``Pipeline`` and every
+    :func:`NaviLib.apply_state`.  Put it in a ``Pipeline`` and every
     ``cross_val_score`` refits the preprocessing on the training part of
     each fold -- the only correct way to do it when any step learns from
     the data, which target encoding, imputation, scaling, Box-Cox and
@@ -165,7 +178,7 @@ class ChainTransformer(BaseEstimator, TransformerMixin):
     Attributes
     ----------
     states_ : list of dict
-        The fitted chain.  Hand it to :func:`navdata.save_state`.
+        The fitted chain.  Hand it to :func:`NaviLib.save_state`.
     feature_names_out_ : list of str
 
     Examples
@@ -197,6 +210,12 @@ class ChainTransformer(BaseEstimator, TransformerMixin):
                 f"ChainTransformer works on DataFrames so column names survive "
                 f"the chain; got {type(X).__name__}."
             )
+        if not X.columns.is_unique:
+            raise ValueError("ChainTransformer requires unique feature names.")
+        if self.target is not None and self.target in X.columns:
+            raise ValueError("X must not contain the target; pass labels separately as y.")
+        if self.target is not None and not self.drop_target:
+            raise ValueError("drop_target=False would expose labels to the estimator.")
         df = X.copy()
         attached = False
         if self.target is not None and y is not None and self.target not in df.columns:
@@ -207,13 +226,29 @@ class ChainTransformer(BaseEstimator, TransformerMixin):
         for fn, kwargs in self.steps:
             kw = dict(kwargs)
             kw["return_state"] = True
-            df, st = fn(df, **kw)
+            import inspect
+            supports_target = "target" in inspect.signature(fn).parameters
+            if attached and supports_target:
+                if kw.get("target") not in (None, self.target):
+                    raise ValueError("Step target must match ChainTransformer.target.")
+                kw["target"] = self.target
+            # Unsupervised functions never see labels, including numeric helper
+            # selection in multivariate imputers.
+            labels = df[self.target].copy() if attached else None
+            step_input = df.drop(columns=[self.target]) if attached and not supports_target else df
+            result, st = fn(step_input, **kw)
+            if len(result) != len(df) or not result.index.equals(df.index):
+                raise ValueError("Pipeline preprocessing must preserve row count and index; split/drop rows before fitting.")
+            df = result
+            if attached:
+                df[self.target] = labels
             self.states_.append(st)
 
         if attached and self.drop_target and self.target in df.columns:
             df = df.drop(columns=[self.target])
         self.feature_names_out_ = list(df.columns)
         self.n_features_in_ = X.shape[1]
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
         return df
 
     def transform(self, X: Frame) -> Frame:
@@ -233,7 +268,11 @@ class ChainTransformer(BaseEstimator, TransformerMixin):
         return out[self.feature_names_out_]
 
     def get_feature_names_out(self, input_features=None):
-        return np.asarray(getattr(self, "feature_names_out_", []), dtype=object)
+        from sklearn.utils.validation import check_is_fitted
+        check_is_fitted(self, "feature_names_out_")
+        if input_features is not None and not np.array_equal(input_features, self.feature_names_in_):
+            raise ValueError("input_features must match fitted feature names.")
+        return np.asarray(self.feature_names_out_, dtype=object)
 
     def describe(self) -> Frame:
         """The fitted chain as a readable table (see ``describe_states``)."""
@@ -260,6 +299,30 @@ def make_preprocessor(
 
     Unknown categories at predict time go to the infrequent bucket instead
     of raising, and rare levels are folded together at ``min_frequency``.
+
+    Parameters
+    ----------
+    numeric : Optional[Sequence[str]], default None
+        Names of numeric columns passed to the numeric preprocessing branch.
+    categorical : Optional[Sequence[str]], default None
+        Categorical column names or indices expected by the selected
+        preprocessing/resampling operation.
+    numeric_impute : str, default 'median'
+        SimpleImputer strategy for the numeric branch.
+    categorical_impute : str, default 'most_frequent'
+        SimpleImputer strategy for the categorical branch.
+    scale : bool, default True
+        Standardize numeric inputs before this operation when True.
+    one_hot : bool, default True
+        One-hot encode categorical values after imputation when True.
+    min_frequency : float, default 0.01
+        Minimum count or frequency share retained as an individual one-hot
+        category.
+
+    Returns
+    -------
+    sklearn.compose.ColumnTransformer
+        Unfitted numeric/categorical preprocessing transformer.
     """
     from sklearn.compose import ColumnTransformer
     from sklearn.impute import SimpleImputer
@@ -296,6 +359,22 @@ def make_pipeline(*steps, balance: Optional[str] = None, ratio="auto",
     predict time.  Resampling anywhere else leaks.
 
     >>> pipe = md.make_pipeline(prep, LGBMClassifier(), balance="smote", ratio=0.3)
+
+    Parameters
+    ----------
+    balance : Optional[str], default None
+        Optional resampling method inserted before the final estimator inside
+        the training fold.
+    ratio : optional, default 'auto'
+        Sampling strategy passed to imbalanced-learn: supported string, ratio,
+        or class-count mapping.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    sklearn.pipeline.Pipeline or imblearn.pipeline.Pipeline
+        Unfitted pipeline with the final estimator named model.
     """
     steps = list(steps)
     if not steps:
@@ -317,7 +396,7 @@ def make_pipeline(*steps, balance: Optional[str] = None, ratio="auto",
 #  2. VALIDATION
 # ======================================================================
 
-def validate(
+def cross_validate_model(
     model,
     X,
     y,
@@ -353,6 +432,31 @@ def validate(
         are what to hand to ``evaluation.tune_threshold`` and
         ``evaluation.plot_calibration``: every prediction was made by a
         model that had not seen that row.
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    cv : Union[int, Any], default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
 
     Returns
     -------
@@ -360,19 +464,21 @@ def validate(
     ``train_mean``, ``overfit_gap`` and the individual ``folds``.
     """
     task = _infer_task(y) if task == "auto" else task
-    scoring = _resolve_scoring(task, scoring)
+    scoring = _resolve_scoring(task, scoring, y)
     splitter = _make_cv(task, cv, y, groups, random_state)
 
     t0 = time.time()
-    res = _sk_cv(model, X, y, cv=splitter, groups=groups, scoring=scoring,
-                 n_jobs=n_jobs, return_train_score=True, error_score="raise")
+    splits = list(splitter.split(X, y, groups))
+    res = _sk_cv(model, X, y, cv=splits, scoring=scoring,
+                 n_jobs=n_jobs, return_train_score=True, error_score="raise",
+                 return_estimator=return_oof)
     table = _tidy(res, scoring)
 
     for name in scoring:
-        sign = -1 if str(scoring[name]).startswith("neg_") else 1
+        sign = _scorer_sign(scoring[name])
         table.loc[name, "train_mean"] = round(float(np.mean(sign * res[f"train_{name}"])), 4)
     gap = table["train_mean"] - table["mean"]
-    table["overfit_gap"] = [round(-g, 4) if m in _LOWER_IS_BETTER else round(g, 4)
+    table["overfit_gap"] = [round(-g, 4) if _scorer_sign(scoring[m]) < 0 else round(g, 4)
                             for m, g in zip(table.index, gap)]
 
     if return_oof:
@@ -380,12 +486,30 @@ def validate(
                   if task in ("classification", "multiclass")
                   and hasattr(model, "predict_proba") else "predict")
         try:
-            oof = cross_val_predict(model, X, y, cv=splitter, groups=groups,
-                                    method=method, n_jobs=n_jobs)
+            from sklearn.utils import _safe_indexing
+            visits = np.zeros(len(y), dtype=int)
+            for _, indices in splits:
+                np.add.at(visits, indices, 1)
+            if not np.all(visits == 1):
+                raise ValueError("OOF output requires each row in exactly one validation fold; time/repeated splits may not form a partition.")
+            classes = np.unique(np.asarray(y))
+            oof = None
+            for estimator, (_, indices) in zip(res["estimator"], splits):
+                pred = getattr(estimator, method)(_safe_indexing(X, indices))
+                if method == "predict_proba":
+                    aligned = np.zeros((len(indices), len(classes)))
+                    positions = [list(classes).index(c) for c in estimator.classes_]
+                    aligned[:, positions] = pred
+                    pred = aligned
+                if oof is None:
+                    oof = np.empty((len(y),) + np.asarray(pred).shape[1:], dtype=np.asarray(pred).dtype)
+                oof[indices] = pred
             if method == "predict_proba" and task == "classification":
                 oof = oof[:, 1]
             table.attrs["oof"] = oof
             table.attrs["oof_method"] = method
+            if method == "predict_proba":
+                table.attrs["classes"] = classes.tolist()
         except Exception as exc:
             warnings.warn(f"Out-of-fold predictions unavailable: {exc}", stacklevel=2)
 
@@ -431,13 +555,59 @@ def compare_algorithms(
     so the comparison is paired and the ``_sd`` columns are comparable.
 
     >>> md.compare_algorithms(X, y)
+
+    Parameters
+    ----------
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    models : Optional[Dict[str, Any]], default None
+        Mapping of display names to estimators. None uses the built-in candidate
+        models.
+    cv : Union[int, Any], default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    groups : optional, default None
+        Group identifiers aligned with rows; observations in one group stay in
+        the same validation partition.
+    include_baseline : bool, default True
+        Include a dummy predictor to contextualize model performance.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     task = _infer_task(y) if task == "auto" else task
-    scoring = _resolve_scoring(task, scoring)
+    scoring = _resolve_scoring(task, scoring, y)
     splitter = _make_cv(task, cv, y, groups, random_state)
     clf = task in ("classification", "multiclass")
 
-    models = dict(_default_models(task, random_state) if models is None else models)
+    use_defaults = models is None
+    models = dict(_default_models(task, random_state) if use_defaults else models)
+    if use_defaults and isinstance(X, pd.DataFrame):
+        numeric = list(X.select_dtypes(include="number").columns)
+        categorical = [c for c in X if c not in numeric]
+        prep = make_preprocessor(numeric=numeric, categorical=categorical, scale=False)
+        models = {name: make_pipeline(clone(prep), estimator) for name, estimator in models.items()}
+    splits = list(splitter.split(X, y, groups))
     if include_baseline:
         from sklearn.dummy import DummyClassifier, DummyRegressor
         models = {"__baseline__": (DummyClassifier(strategy="prior") if clf
@@ -448,11 +618,11 @@ def compare_algorithms(
     for name, mdl in models.items():
         label = "baseline (prior)" if name == "__baseline__" else name
         try:
-            res = _sk_cv(clone(mdl), X, y, cv=splitter, groups=groups,
+            res = _sk_cv(clone(mdl), X, y, cv=splits,
                          scoring=scoring, n_jobs=n_jobs, error_score="raise")
             rec: Dict[str, Any] = {"model": label}
             for m in scoring:
-                sign = -1 if str(scoring[m]).startswith("neg_") else 1
+                sign = _scorer_sign(scoring[m])
                 v = sign * res[f"test_{m}"]
                 rec[m] = round(float(np.mean(v)), 4)
                 rec[f"{m}_sd"] = round(float(np.std(v)), 4)
@@ -465,7 +635,7 @@ def compare_algorithms(
     out = pd.DataFrame(rows).set_index("model")
     primary = list(scoring)[0]
     if primary in out.columns:
-        out = out.sort_values(primary, ascending=primary in _LOWER_IS_BETTER,
+        out = out.sort_values(primary, ascending=_scorer_sign(scoring[primary]) < 0,
                               na_position="last")
     out.attrs["primary"] = primary
 
@@ -522,7 +692,7 @@ def _default_models(task: str, random_state: int) -> Dict[str, Any]:
 #  3. TUNING
 # ======================================================================
 
-def tune(
+def tune_model(
     model,
     param_space: Dict[str, Any],
     X,
@@ -558,6 +728,36 @@ def tune(
         (``{"model__max_depth": randint(3, 12)}``).  For ``grid``, lists.
     refit : bool, default True
         Refit the best configuration on all of ``X``.
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    n_iter : int, default 40
+        Number of parameter settings sampled by randomized search.
+    cv : Union[int, Any], default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    groups : optional, default None
+        Group identifiers aligned with rows; observations in one group stay in
+        the same validation partition.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
 
     Returns
     -------
@@ -575,7 +775,7 @@ def tune(
     from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 
     task = _infer_task(y) if task == "auto" else task
-    scoring_map = _resolve_scoring(task, scoring)
+    scoring_map = _resolve_scoring(task, scoring, y)
     primary = list(scoring_map)[0]
     splitter = _make_cv(task, cv, y, groups, random_state)
 
@@ -670,11 +870,47 @@ def nested_validate(
     DataFrame of outer-fold scores, with the chosen parameters per fold in
     ``attrs["params_per_fold"]`` -- if those differ wildly across folds,
     the search is unstable and the tuned model should not be trusted.
+
+    Parameters
+    ----------
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    param_space : Dict[str, Any]
+        Estimator parameter distributions/lists. Pipeline parameter names use
+        step__parameter syntax.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    inner_cv : int, default 3
+        Number of inner folds used only for hyperparameter selection.
+    outer_cv : int, default 5
+        Number of outer folds used for evaluating the complete tuning procedure.
+    n_iter : int, default 20
+        Number of parameter settings sampled by randomized search.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    groups : optional, default None
+        Group identifiers aligned with rows; observations in one group stay in
+        the same validation partition.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
     """
     from sklearn.model_selection import RandomizedSearchCV
 
     task = _infer_task(y) if task == "auto" else task
-    scoring_map = _resolve_scoring(task, scoring)
+    scoring_map = _resolve_scoring(task, scoring, y)
     primary = list(scoring_map)[0]
     outer = _make_cv(task, outer_cv, y, groups, random_state)
 
@@ -685,15 +921,16 @@ def nested_validate(
     scores, chosen = [], []
     t0 = time.time()
     for fold, (tr, te) in enumerate(outer.split(X_df, y_arr, groups), 1):
-        inner = _make_cv(task, inner_cv, y_arr.iloc[tr], None, random_state)
+        train_groups = None if groups is None else np.asarray(groups)[tr]
+        inner = _make_cv(task, inner_cv, y_arr.iloc[tr], train_groups, random_state)
         srch = RandomizedSearchCV(model, param_space, n_iter=n_iter, cv=inner,
                                   scoring=scoring_map[primary], n_jobs=n_jobs,
                                   random_state=random_state, refit=True)
-        srch.fit(X_df.iloc[tr], y_arr.iloc[tr])
+        srch.fit(X_df.iloc[tr], y_arr.iloc[tr], groups=train_groups)
         from sklearn.metrics import get_scorer
         s = get_scorer(scoring_map[primary])(srch.best_estimator_,
                                              X_df.iloc[te], y_arr.iloc[te])
-        sign = -1 if str(scoring_map[primary]).startswith("neg_") else 1
+        sign = _scorer_sign(scoring_map[primary])
         scores.append(sign * float(s))
         chosen.append(srch.best_params_)
         if verbose:
@@ -720,7 +957,7 @@ def nested_validate(
 #  4. TRAIN & PREDICT
 # ======================================================================
 
-def train(
+def train_model(
     model,
     X,
     y,
@@ -753,6 +990,38 @@ def train(
     dict with ``model``, ``threshold``, ``task``, ``classes``,
     ``feature_names``, ``trained_at`` and ``versions`` -- the shape
     :func:`save_model` expects.
+
+    Parameters
+    ----------
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    threshold : Optional[Union[float, Literal['auto']]], default None
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    cost_fn : float, default 1.0
+        Nonnegative cost assigned to one false negative.
+    cost_fp : float, default 1.0
+        Nonnegative cost assigned to one false positive.
+    cv : int, default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    calibrate : Optional[Literal['sigmoid', 'isotonic']], default None
+        Optional sigmoid or isotonic probability calibration fitted by cross-
+        validation.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
     """
     task = _infer_task(y) if task == "auto" else task
     clf = task in ("classification", "multiclass")
@@ -775,7 +1044,9 @@ def train(
             from .cleaning import tune_threshold as _tt
         except ImportError:
             from cleaning import tune_threshold as _tt
-        r = _tt(pd.Series(y).to_numpy(), oof, metric="cost",
+        positive = np.unique(np.asarray(y))[1]
+        binary_y = (np.asarray(y) == positive).astype(int)
+        r = _tt(binary_y, oof, metric="cost",
                 cost_fn=cost_fn, cost_fp=cost_fp)
         thr = r["threshold"]
         flag_rate = float((oof >= thr).mean())
@@ -787,12 +1058,16 @@ def train(
             warnings.warn(
                 f"The cost-optimal threshold flags {flag_rate:.1%} of rows, which "
                 f"is a degenerate rule: at a {cost_fn}:{cost_fp} cost ratio with "
-                f"{pd.Series(y).mean():.1%} prevalence, 'always predict the same "
+                f"{binary_y.mean():.1%} prevalence, 'always predict the same "
                 f"class' really is cheapest. The model is not being used. Lower "
                 f"cost_fn, or optimise metric='f1' instead of cost.",
                 stacklevel=2)
     elif isinstance(threshold, (int, float)):
+        if task != "classification" or not 0 <= threshold <= 1:
+            raise ValueError("A numeric threshold requires a binary task and a value in [0, 1].")
         thr = float(threshold)
+    elif threshold is not None:
+        raise ValueError("threshold must be None, 'auto', or a number in [0, 1].")
 
     t0 = time.time()
     mdl.fit(X, y)
@@ -806,7 +1081,7 @@ def train(
         "classes": (list(getattr(mdl, "classes_", [])) if clf else None),
         "feature_names": (list(X.columns) if isinstance(X, pd.DataFrame) else None),
         "n_train": len(pd.Series(y)),
-        "prevalence": (float(pd.Series(y).value_counts(normalize=True).min())
+        "prevalence": (float((np.asarray(y) == mdl.classes_[1]).mean())
                        if task == "classification" else None),
         "trained_at": pd.Timestamp.now().isoformat(timespec="seconds"),
         "fit_time_s": elapsed,
@@ -818,7 +1093,7 @@ def train(
     return art
 
 
-def predict(artifact: Dict[str, Any], X, correct_prior: bool = False,
+def predict_model(artifact: Dict[str, Any], X, correct_prior: bool = False,
             true_prevalence: Optional[float] = None) -> Frame:
     """Predict with an artifact, honouring its stored threshold.
 
@@ -830,7 +1105,31 @@ def predict(artifact: Dict[str, Any], X, correct_prior: bool = False,
     ``correct_prior=True`` rescales probabilities back to
     ``true_prevalence`` using :func:`cleaning.prior_correct`, for models
     trained on resampled data.
+
+    Parameters
+    ----------
+    artifact : Dict[str, Any]
+        Model artifact returned by train_model. predict_model also accepts a
+        load_model bundle and replays any separately stored states.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    correct_prior : bool, default False
+        Adjust binary probabilities from training prevalence to true_prevalence.
+        Assumes prior shift with unchanged class-conditional distributions.
+    true_prevalence : Optional[float], default None
+        Positive-class prevalence in the deployment population, in (0, 1).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
+    if "artifact" in artifact:
+        if artifact.get("states"):
+            X = apply_state(X, artifact["states"])
+        artifact = artifact["artifact"]
     mdl, task = artifact["model"], artifact["task"]
     names = artifact.get("feature_names")
     if names and isinstance(X, pd.DataFrame):
@@ -844,6 +1143,10 @@ def predict(artifact: Dict[str, Any], X, correct_prior: bool = False,
         return pd.DataFrame({"prediction": mdl.predict(X)},
                             index=getattr(X, "index", None))
 
+    if not hasattr(mdl, "predict_proba"):
+        if correct_prior:
+            raise ValueError("Prior correction requires predict_proba.")
+        return pd.DataFrame({"prediction": mdl.predict(X)}, index=getattr(X, "index", None))
     proba = mdl.predict_proba(X)
     if task == "classification":
         p = proba[:, 1]
@@ -855,7 +1158,8 @@ def predict(artifact: Dict[str, Any], X, correct_prior: bool = False,
             except ImportError:
                 from cleaning import prior_correct
             p = prior_correct(p, artifact["prevalence"], true_prevalence)
-        thr = artifact.get("threshold", 0.5) or 0.5
+        thr = artifact.get("threshold")
+        thr = 0.5 if thr is None else thr
         classes = artifact.get("classes") or [0, 1]
         return pd.DataFrame({"probability": p,
                              "prediction": np.where(p >= thr, classes[1], classes[0])},
@@ -911,6 +1215,35 @@ def explain(
     -------
     DataFrame sorted by importance, with ``sd`` where the method provides
     it and a ``note`` column flagging negative or unstable values.
+
+    Parameters
+    ----------
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : optional, default None
+        Observed target values, positionally aligned with X.
+    method : Literal['permutation', 'builtin', 'shap', 'coef'], default 'permutation'
+        Algorithm to use; see the supported methods and assumptions above.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    n_repeats : int, default 10
+        Number of feature permutations used to estimate importance and its
+        spread.
+    max_display : Optional[int], default None
+        Maximum number of features included in an explanation plot.
+    sample : Optional[int], default 2000
+        Maximum number of observations sampled for plotting or expensive
+        diagnostics.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
     """
     from sklearn.exceptions import NotFittedError
     from sklearn.utils.validation import check_is_fitted
@@ -930,6 +1263,12 @@ def explain(
         names = list(X.columns)
     else:
         names = [f"f{i}" for i in range(np.asarray(X).shape[1])]
+
+    if method in ("builtin", "coef") and hasattr(model, "steps") and len(model.steps) > 1:
+        try:
+            names = list(model[:-1].get_feature_names_out())
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("Pipeline preprocessing must expose get_feature_names_out for coefficient/builtin importance; use permutation importance otherwise.") from exc
 
     Xs, ys = X, y
     if sample and len(X) > sample:
@@ -1032,18 +1371,52 @@ def learning_curve(
 
     This is the cheapest way to decide whether to spend the next week on
     data collection or on modelling.
+
+    Parameters
+    ----------
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    sizes : Sequence[float], default (0.1, 0.25, 0.5, 0.75, 1.0)
+        Training-size fractions or absolute counts for the learning curve.
+    cv : Union[int, Any], default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    scoring : optional, default None
+        Scikit-learn scorer name or mapping of names to scorers. None selects
+        task-specific defaults. Negative loss scorers are converted to positive
+        losses in comparison tables.
+    task : Literal['auto', 'classification', 'multiclass', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from sklearn.model_selection import learning_curve as _lc
 
     task = _infer_task(y) if task == "auto" else task
-    scoring_map = _resolve_scoring(task, scoring)
+    scoring_map = _resolve_scoring(task, scoring, y)
     primary = list(scoring_map)[0]
     splitter = _make_cv(task, cv, y, None, random_state)
 
     n, tr, te = _lc(model, X, y, train_sizes=np.asarray(sizes), cv=splitter,
                     scoring=scoring_map[primary], n_jobs=n_jobs, shuffle=True,
                     random_state=random_state)
-    sign = -1 if str(scoring_map[primary]).startswith("neg_") else 1
+    sign = _scorer_sign(scoring_map[primary])
     out = pd.DataFrame({
         "n_train": n,
         "train_mean": (sign * tr).mean(axis=1).round(4),
@@ -1066,7 +1439,25 @@ def learning_curve(
 
 def plot_learning_curve(curve: Frame, figsize: Tuple[float, float] = (7, 4.5),
                         show: bool = True):
-    """Plot a :func:`learning_curve` table with its verdict in the title."""
+    """Plot a :func:`learning_curve` table with its verdict in the title.
+
+    Parameters
+    ----------
+    curve : pandas.DataFrame
+        Summary DataFrame returned by modeling.learning_curve.
+    figsize : Tuple[float, float], default (7, 4.5)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
+    """
     plt = _plt()
     m = curve.attrs.get("metric", "score")
     with _style():
@@ -1092,6 +1483,26 @@ def plot_importance(importance: Frame, top: int = 20,
     Error bars are the spread across permutation repeats; a bar whose error
     bar crosses zero is not distinguishable from noise, and is drawn in
     grey to say so.
+
+    Parameters
+    ----------
+    importance : pandas.DataFrame
+        Feature-importance table returned by explain.
+    top : int, default 20
+        Maximum number of columns, categories or findings included in the
+        displayed result.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     d = importance.head(top).iloc[::-1]
@@ -1104,7 +1515,7 @@ def plot_importance(importance: Frame, top: int = 20,
                 xerr=d["sd"] if has_sd else None, error_kw={"lw": 1, "alpha": .6})
         ax.set_yticks(range(len(d)))
         ax.set_yticklabels(d["feature"], fontsize=9)
-        ax.axvline(0, color="black", lw=.8)
+        ax.axvline(0, color=NEUTRAL, lw=.8)
         ax.set_xlabel(f"importance ({importance.attrs.get('method', '')})")
         ax.set_title("Feature importance", fontweight="bold", fontsize=11)
         return _finish(fig, show)
@@ -1127,6 +1538,29 @@ def save_model(artifact: Dict[str, Any], path: str,
     reproduce a prediction goes in one file.
 
     Unpickling executes code, so never load an artifact you did not create.
+
+    Parameters
+    ----------
+    artifact : Dict[str, Any]
+        Model artifact returned by train_model. predict_model also accepts a
+        load_model bundle and replays any separately stored states.
+    path : str
+        Destination or source filesystem path; pathlib.Path is also accepted.
+    states : Optional[Sequence[Dict[str, Any]]], default None
+        Ordered fitted preprocessing states to store alongside the model.
+    metrics : Optional[pandas.DataFrame], default None
+        Metrics to calculate, or a metrics table to store, as indicated by the
+        signature.
+    notes : str, default ''
+        Free-text provenance or context saved with the model bundle.
+    compress : int, default 3
+        Joblib compression level; 0 disables compression and larger values trade
+        speed for size.
+
+    Returns
+    -------
+    str
+        Absolute path to the written joblib bundle.
     """
     import os
     import joblib
@@ -1136,7 +1570,7 @@ def save_model(artifact: Dict[str, Any], path: str,
         "metrics": metrics,
         "notes": notes,
         "saved_at": pd.Timestamp.now().isoformat(timespec="seconds"),
-        "navdata_version": _package_version(),
+        "NaviLib_version": _package_version(),
     }
     if states is not None:
         payload["state_summary"] = describe_states(list(states))
@@ -1148,12 +1582,27 @@ def save_model(artifact: Dict[str, Any], path: str,
 
 
 def load_model(path: str, check_versions: bool = True) -> Dict[str, Any]:
-    """Load a :func:`save_model` bundle, warning on library version drift."""
+    """Load a :func:`save_model` bundle, warning on library version drift.
+
+    Parameters
+    ----------
+    path : str
+        Destination or source filesystem path; pathlib.Path is also accepted.
+    check_versions : bool, default True
+        Warn when saved and installed scikit-learn versions differ. Only load
+        trusted joblib files.
+
+    Returns
+    -------
+    dict
+        Bundle containing artifact, optional states, metrics, notes and version
+        metadata. Pass directly to predict_model, or access bundle["artifact"].
+    """
     import joblib
     import sklearn
     payload = joblib.load(path)
     if not isinstance(payload, dict) or "artifact" not in payload:
-        raise ValueError(f"{path} is not a navdata model bundle.")
+        raise ValueError(f"{path} is not a NaviLib model bundle.")
     if check_versions:
         saved = payload["artifact"].get("versions", {}).get("sklearn")
         if saved and saved != sklearn.__version__:
@@ -1188,3 +1637,11 @@ __all__ = [
     # constants
     "DEFAULT_SCORING",
 ]
+
+
+# Compatibility aliases: existing notebooks remain supported.
+validate = cross_validate_model
+tune = tune_model
+train = train_model
+predict = predict_model
+__all__ += ['cross_validate_model', 'tune_model', 'train_model', 'predict_model']

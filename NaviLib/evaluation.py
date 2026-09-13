@@ -5,7 +5,7 @@ evaluate
 Model evaluation for regression, classification, clustering, ranking and
 recommenders.
 
-Companion to ``datakit`` (cleaning + imbalance) and ``eda`` (exploration).
+Companion to ``NaviLib`` (cleaning + imbalance) and ``eda`` (exploration).
 
 Design principles
 -----------------
@@ -23,7 +23,7 @@ Design principles
 
 Quick start
 -----------
->>> import evaluate as ev
+>>> from NaviLib import evaluation as ev
 >>> ev.score_classification(y_true, y_pred, y_prob, ci=True)
 >>> ev.report_classification(y_true, y_pred, y_prob)      # numbers + plots + verdict
 >>> ev.compare_models({"rf": p_rf, "lgbm": p_lgb}, y_true)
@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-__version__ = "2.0.0"
+from ._version import __version__
 
 Frame = pd.DataFrame
 ArrayLike = Union[np.ndarray, pd.Series, Sequence]
@@ -70,6 +70,8 @@ def _as_array(x: ArrayLike, name: str = "input") -> np.ndarray:
     if isinstance(x, (pd.Series, pd.DataFrame)):
         x = x.to_numpy()
     a = np.asarray(x)
+    if a.ndim == 0 or a.ndim > 2:
+        raise ValueError(f"{name} must be 1-dimensional, got shape {a.shape}.")
     if a.ndim > 1:
         if a.shape[1] == 1:
             a = a.ravel()
@@ -118,6 +120,11 @@ def bootstrap_ci(
         More is smoother; 1000 is plenty for a 95% interval.
     stratify : array-like, optional
         Usually ``y_true``.  Strongly recommended for imbalanced data.
+    alpha : float, default 0.05
+        Significance level in (0, 1); confidence intervals have nominal coverage
+        1 - alpha.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
 
     Returns
     -------
@@ -127,8 +134,14 @@ def bootstrap_ci(
     >>> ev.bootstrap_ci(roc_auc_score, y_true, y_prob, stratify=y_true)
     (0.918, 0.847, 0.968)
     """
+    if not arrays or not isinstance(n_boot, (int, np.integer)) or n_boot < 20 or not 0 < alpha < 1:
+        raise ValueError("Provide at least one array, n_boot >= 20 and alpha in (0, 1).")
     arrays = [_as_array(a) for a in arrays]
     n = len(arrays[0])
+    if not n or any(len(a) != n for a in arrays):
+        raise ValueError("Bootstrap arrays must be nonempty and have equal lengths.")
+    if stratify is not None and (len(_as_array(stratify)) != n or pd.isna(stratify).any()):
+        raise ValueError("stratify must match array length and contain no missing values.")
     rng = np.random.default_rng(random_state)
 
     try:
@@ -196,7 +209,7 @@ def score_regression(
     Every scale-dependent error (MAE, RMSE) is meaningless on its own -- an
     RMSE of 400 is excellent for house prices and catastrophic for
     probabilities.  The ``vs_baseline`` column expresses each error as a
-    ratio against always predicting the training mean (or median), so
+    ratio against always predicting the evaluation-sample mean (or median), so
     values below 1 mean the model beats the naive rule and values above 1
     mean it does not.
 
@@ -216,6 +229,36 @@ def score_regression(
     silently rescued with an epsilon -- an epsilon of 1e-8 turns a single
     zero into an 8-digit percentage error and destroys the average.
     ``smape`` is given as the symmetric alternative that survives zeros.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : array-like
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    ci : bool, default False
+        Request bootstrap confidence intervals for supported metrics. This adds
+        repeated metric computation.
+    n_boot : int, default 500
+        Number of paired bootstrap resamples used to estimate metric
+        uncertainty.
+    baseline : Literal['mean', 'median', 'none'], default 'mean'
+        Constant baseline derived from this evaluation sample: mean, median,
+        or none. It is descriptive, not a separately trained baseline model.
+    sample_weight : Optional[array-like], default None
+        Finite nonnegative row weights, with positive total weight. Applied to
+        MAE, RMSE, median absolute error, bias, R2, explained variance, MAPE,
+        SMAPE, their supported bootstrap intervals and constant baselines.
+        Correlations and maximum error remain unweighted.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from scipy.stats import pearsonr, spearmanr
     from sklearn.metrics import (explained_variance_score, max_error,
@@ -223,11 +266,19 @@ def score_regression(
                                  median_absolute_error, r2_score)
 
     y_true, y_pred = _check_pair(y_true, y_pred)
+    if baseline not in {"mean", "median", "none"}:
+        raise ValueError("baseline must be mean, median, or none.")
+    if sample_weight is not None:
+        sample_weight = _as_array(sample_weight, "sample_weight").astype(float)
+        if len(sample_weight) != len(y_true) or not np.isfinite(sample_weight).all() or (sample_weight < 0).any():
+            raise ValueError("sample_weight must have matching length and finite, nonnegative values.")
     finite = np.isfinite(y_true) & np.isfinite(y_pred)
     if not finite.all():
         warnings.warn(f"Dropped {(~finite).sum()} non-finite pair(s).", stacklevel=2)
         y_true, y_pred = y_true[finite], y_pred[finite]
     w = _as_array(sample_weight)[finite] if sample_weight is not None else None
+    if not len(y_true) or (w is not None and w.sum() <= 0):
+        raise ValueError("At least one finite pair with positive total weight is required.")
 
     resid = y_true - y_pred
     mae = float(mean_absolute_error(y_true, y_pred, sample_weight=w))
@@ -237,18 +288,18 @@ def score_regression(
     if n_zero:
         mape = np.nan
     else:
-        mape = float(np.mean(np.abs(resid / y_true)) * 100)
+        mape = float(np.average(np.abs(resid / y_true), weights=w) * 100)
     denom = (np.abs(y_true) + np.abs(y_pred)) / 2
-    smape = float(np.mean(np.abs(resid[denom > 0]) / denom[denom > 0]) * 100) \
-        if (denom > 0).any() else np.nan
+    smape = float(np.average(np.divide(np.abs(resid), denom,
+                          out=np.zeros_like(resid, dtype=float), where=denom > 0), weights=w) * 100)
 
     rows = [
         {"metric": "n", "value": len(y_true)},
         {"metric": "mae", "value": round(mae, 6)},
         {"metric": "rmse", "value": round(rmse, 6)},
-        {"metric": "medae", "value": round(float(median_absolute_error(y_true, y_pred)), 6)},
+        {"metric": "medae", "value": round(float(median_absolute_error(y_true, y_pred, sample_weight=w)), 6)},
         {"metric": "max_error", "value": round(float(max_error(y_true, y_pred)), 6)},
-        {"metric": "bias", "value": round(float(resid.mean()), 6)},
+        {"metric": "bias", "value": round(float(np.average(resid, weights=w)), 6)},
         {"metric": "r2", "value": round(float(r2_score(y_true, y_pred, sample_weight=w)), 4)},
         {"metric": "explained_variance",
          "value": round(float(explained_variance_score(y_true, y_pred, sample_weight=w)), 4)},
@@ -271,9 +322,13 @@ def score_regression(
         out.loc["bias", "note"] = "systematic offset: residuals not centred on zero"
 
     if baseline != "none":
-        ref = float(np.median(y_true) if baseline == "median" else np.mean(y_true))
-        b_mae = float(np.mean(np.abs(y_true - ref)))
-        b_rmse = float(np.sqrt(np.mean((y_true - ref) ** 2)))
+        if baseline == "median" and w is not None:
+            order = np.argsort(y_true)
+            ref = float(y_true[order][np.searchsorted(np.cumsum(w[order]), w.sum() / 2)])
+        else:
+            ref = float(np.median(y_true) if baseline == "median" else np.average(y_true, weights=w))
+        b_mae = float(np.average(np.abs(y_true - ref), weights=w))
+        b_rmse = float(np.sqrt(np.average((y_true - ref) ** 2, weights=w)))
         out["vs_baseline"] = np.nan
         out.loc["mae", "vs_baseline"] = round(mae / b_mae, 4) if b_mae else np.nan
         out.loc["rmse", "vs_baseline"] = round(rmse / b_rmse, 4) if b_rmse else np.nan
@@ -285,13 +340,14 @@ def score_regression(
     if ci:
         from sklearn.metrics import mean_absolute_error as _mae, r2_score as _r2
         specs = {
-            "mae": lambda a, b: _mae(a, b),
-            "rmse": lambda a, b: float(np.sqrt(np.mean((a - b) ** 2))),
-            "r2": lambda a, b: _r2(a, b),
-            "bias": lambda a, b: float(np.mean(a - b)),
+            "mae": lambda a, b, weights=None: _mae(a, b, sample_weight=weights),
+            "rmse": lambda a, b, weights=None: float(np.sqrt(np.average((a - b) ** 2, weights=weights))),
+            "r2": lambda a, b, weights=None: _r2(a, b, sample_weight=weights),
+            "bias": lambda a, b, weights=None: float(np.average(a - b, weights=weights)),
         }
         rows2 = out.reset_index().to_dict("records")
-        rows2 = _maybe_ci(rows2, True, specs, (y_true, y_pred),
+        arrays = (y_true, y_pred) if w is None else (y_true, y_pred, w)
+        rows2 = _maybe_ci(rows2, True, specs, arrays,
                           n_boot=n_boot, random_state=random_state)
         out = _table(rows2)
 
@@ -318,6 +374,31 @@ def plot_regression(
     Large samples are thinned to ``sample`` points for the scatter panels
     so the figure stays readable and fast; the metrics annotated on it are
     still computed on everything.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : array-like
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    figsize : Tuple[float, float], default (14, 9)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    sample : Optional[int], default 5000
+        Maximum number of observations sampled for plotting or expensive
+        diagnostics.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt, sns = _plt(), _sns()
     from scipy import stats as sps
@@ -411,33 +492,43 @@ def plot_regression(
 def _resolve_pos_label(y_true: np.ndarray, pos_label=None):
     """Decide which class counts as 'positive'.
 
-    Guessing ``np.unique(y)[1]`` is wrong as often as it is right: with
-    labels ``['positive', 'negative']`` alphabetical order makes 'positive'
-    the *negative* class.  Rules, in order: an explicit ``pos_label``; the
-    literal 1 / True if present; otherwise the minority class, which is
-    what you almost always mean by "the event".
+    An explicit pos_label takes precedence. Otherwise use the last sorted
+    class, matching scikit-learn probability column order. Minority-class
+    frequency does not determine the meaning of a probability vector.
     """
     classes = np.unique(y_true)
     if pos_label is not None:
         if pos_label not in classes:
             raise ValueError(f"pos_label={pos_label!r} not in y_true ({classes}).")
         return pos_label
-    for cand in (1, True, "1"):
-        if cand in classes:
-            return classes[list(classes).index(cand)]
-    counts = pd.Series(y_true).value_counts()
-    return counts.idxmin()
+    return classes[-1]
 
 
 def _proba_1d(y_prob: ArrayLike) -> np.ndarray:
     """Accept either a 1-D score vector or the (n, 2) predict_proba matrix."""
     p = np.asarray(y_prob)
+    if p.ndim not in (1, 2) or not np.isfinite(p).all() or ((p < 0) | (p > 1)).any():
+        raise ValueError("Probabilities must be finite values in [0, 1].")
     if p.ndim == 2:
         if p.shape[1] == 2:
+            if not np.allclose(p.sum(axis=1), 1):
+                raise ValueError("Probability matrix rows must sum to 1.")
             return p[:, 1]
         raise ValueError("For multiclass probabilities pass the full (n, k) matrix "
                          "to the multiclass path, not a binary metric.")
     return p.ravel()
+
+
+def _binary_proba(y_prob, y_true, pos_label=None, classes=None):
+    p = _proba_1d(y_prob)
+    classes = np.unique(np.asarray(y_true)) if classes is None else np.asarray(classes)
+    if len(classes) != 2:
+        raise ValueError("Binary probability metrics require exactly two classes.")
+    if len(p) != len(y_true):
+        raise ValueError("Probabilities and labels must have equal lengths.")
+    if np.asarray(y_prob).ndim == 2 and _resolve_pos_label(np.asarray(y_true), pos_label) != classes[1]:
+        p = 1 - p
+    return p
 
 
 def score_classification(
@@ -471,13 +562,42 @@ def score_classification(
     - **Brier score and calibration slope** are reported, because a model
       can rank perfectly (high AUC) and still output probabilities that are
       badly wrong.
-    - **``pos_label`` is resolved explicitly**, defaulting to the minority
-      class rather than to alphabetical order.
+    - **``pos_label`` is resolved explicitly**, following scikit-learn class order
+      unless the positive label is supplied explicitly.
 
     Returns
     -------
     DataFrame indexed by metric, with ``value``, optional ``ci_low`` /
     ``ci_high``, and a ``note`` column carrying the interpretation.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : Optional[array-like], default None
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    y_prob : Optional[array-like], default None
+        Predicted probabilities. A binary vector must refer to pos_label; a
+        matrix follows class order. Multiclass matrices have one column per
+        class.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    threshold : float, default 0.5
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    ci : bool, default False
+        Request bootstrap confidence intervals for supported metrics. This adds
+        repeated metric computation.
+    n_boot : int, default 500
+        Number of paired bootstrap resamples used to estimate metric
+        uncertainty.
+    labels : Optional[Sequence], default None
+        Explicit class or bin labels, in the order expected by the operation.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
     """
     from sklearn.metrics import (accuracy_score, average_precision_score,
                                  balanced_accuracy_score, brier_score_loss,
@@ -491,11 +611,18 @@ def score_classification(
 
     classes = np.unique(y_true) if labels is None else np.asarray(labels)
     n_classes = len(classes)
+    if not len(y_true) or pd.isna(y_true).any() or n_classes < 2:
+        raise ValueError("Classification scoring requires nonmissing labels from at least two classes.")
+    if not 0 <= threshold <= 1:
+        raise ValueError("threshold must be in [0, 1].")
     binary = n_classes == 2
 
     p1 = None
     if y_prob is not None:
-        p1 = _proba_1d(y_prob) if binary else np.asarray(y_prob)
+        p1 = _binary_proba(y_prob, y_true, pos_label, classes) if binary else np.asarray(y_prob)
+        if not binary and (p1.shape != (len(y_true), n_classes) or not np.isfinite(p1).all()
+                           or ((p1 < 0) | (p1 > 1)).any() or not np.allclose(p1.sum(axis=1), 1)):
+            raise ValueError("Multiclass probabilities must have shape (n_rows, n_classes), finite values in [0, 1], and rows summing to 1.")
         if binary and len(p1) != len(y_true):
             raise ValueError(f"y_prob has {len(p1)} rows, y_true has {len(y_true)}.")
 
@@ -553,7 +680,7 @@ def score_classification(
             {"metric": "tp", "value": int(tp)}, {"metric": "fp", "value": int(fp)},
             {"metric": "fn", "value": int(fn)}, {"metric": "tn", "value": int(tn)},
         ]
-        notes["specificity"] = f"of {int(tp + fn)} true events, {int(tp)} caught"
+        notes["recall"] = f"of {int(tp + fn)} true events, {int(tp)} caught"
 
         if p1 is not None:
             yb = (y_true == pos).astype(int)
@@ -585,7 +712,7 @@ def score_classification(
                     "over-confident (predictions too extreme)" if slope < 0.9 else
                     "under-confident (predictions too flat)")
             if intercept > 0.5:
-                notes["calibration_intercept"] = ("risks systematically OVER-estimated "
+                notes["calibration_intercept"] = ("risks systematically UNDER-estimated "
                                                   "— did you resample? use prior_correct()")
     else:
         for avg_kind in ("micro", "weighted"):
@@ -671,6 +798,24 @@ def per_class_report(
     Adds what ``classification_report`` leaves out: how many of each class's
     errors went to which other class, so you can see *what* it is being
     confused with rather than only that it is being confused.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : array-like
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    labels : Optional[Sequence], default None
+        Explicit class or bin labels, in the order expected by the operation.
+    class_names : Optional[Sequence[str]], default None
+        Display names for classes, following the supplied/derived class order.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 
@@ -717,9 +862,35 @@ def threshold_sweep(
     This sweeps the whole range and reports sensitivity, specificity,
     precision, F1, Youden's J and expected cost at each, so you can pick
     the point that matches what a miss actually costs you.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_prob : array-like
+        Predicted probabilities. A binary vector must refer to pos_label; a
+        matrix follows class order. Multiclass matrices have one column per
+        class.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    n_steps : int, default 200
+        Number of evenly spaced candidate decision thresholds.
+    cost_fn : float, default 1.0
+        Nonnegative cost assigned to one false negative.
+    cost_fp : float, default 1.0
+        Nonnegative cost assigned to one false positive.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     y_true = _as_array(y_true)
-    p = _proba_1d(y_prob)
+    p = _binary_proba(y_prob, y_true, pos_label)
     pos = _resolve_pos_label(y_true, pos_label)
     yb = (y_true == pos).astype(int)
     n_pos, n_neg = int(yb.sum()), int((1 - yb).sum())
@@ -773,14 +944,39 @@ def decision_curve(
     The model is worth using only over the range of ``pt`` where its net
     benefit sits above both reference lines.  This is the analysis that
     separates a clinically useful model from one with an impressive AUC.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_prob : array-like
+        Predicted probabilities. A binary vector must refer to pos_label; a
+        matrix follows class order. Multiclass matrices have one column per
+        class.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    thresholds : Optional[Sequence[float]], default None
+        Explicit probability cutoffs for evaluating net benefit; None uses the
+        default grid.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     y_true = _as_array(y_true)
-    p = _proba_1d(y_prob)
+    p = _binary_proba(y_prob, y_true, pos_label)
     pos = _resolve_pos_label(y_true, pos_label)
     yb = (y_true == pos).astype(int)
     n = len(yb)
     prevalence = yb.mean()
     pts = np.asarray(thresholds) if thresholds is not None else np.linspace(0.01, 0.99, 99)
+    if pts.ndim != 1 or not len(pts) or not np.isfinite(pts).all() or ((pts <= 0) | (pts >= 1)).any():
+        raise ValueError("Decision-curve thresholds must be finite values strictly between 0 and 1.")
 
     rows = []
     for pt in pts:
@@ -832,6 +1028,39 @@ def plot_classification(
     score distribution shows *why* the classes are confused, and the
     threshold panel shows that the reported precision/recall trade-off was
     a choice, not a property of the model.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : Optional[array-like], default None
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    y_prob : Optional[array-like], default None
+        Predicted probabilities. A binary vector must refer to pos_label; a
+        matrix follows class order. Multiclass matrices have one column per
+        class.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    threshold : float, default 0.5
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    class_names : Optional[Sequence[str]], default None
+        Display names for classes, following the supplied/derived class order.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt, sns = _plt(), _sns()
     from sklearn.metrics import (average_precision_score, confusion_matrix,
@@ -842,7 +1071,7 @@ def plot_classification(
     binary = len(classes) == 2
     names = list(class_names) if class_names is not None else [str(c) for c in classes]
 
-    p1 = _proba_1d(y_prob) if (y_prob is not None and binary) else None
+    p1 = _binary_proba(y_prob, y_true, pos_label) if (y_prob is not None and binary) else None
     if y_pred is None:
         if p1 is None:
             raise ValueError("Provide y_pred or y_prob.")
@@ -891,7 +1120,7 @@ def plot_classification(
             auc_ = roc_auc_score(yb, p1)
             a_roc.plot(fpr, tpr, lw=2.2, color=PALETTE[0], label=f"AUC = {auc_:.3f}")
             a_roc.fill_between(fpr, tpr, alpha=.12, color=PALETTE[0])
-            a_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=.5, label="random = 0.500")
+            a_roc.plot([0, 1], [0, 1], "--", color=NEUTRAL, lw=1, alpha=.5, label="random = 0.500")
             j = np.argmax(tpr - fpr)
             a_roc.plot(fpr[j], tpr[j], "o", color=BAD, ms=7,
                        label=f"max Youden J = {tpr[j] - fpr[j]:.3f}")
@@ -920,7 +1149,7 @@ def plot_classification(
                 a_cal.plot(mean_p, frac, "o-", color=PALETTE[0], lw=2, ms=6,
                            label="model")
                 slope, inter = _calibration_fit(yb, p1)
-                a_cal.plot([0, 1], [0, 1], "k--", lw=1.2, label="perfect")
+                a_cal.plot([0, 1], [0, 1], "--", color=NEUTRAL, lw=1.2, label="perfect")
                 a_cal.set_xlabel("mean predicted probability")
                 a_cal.set_ylabel("observed frequency")
                 a_cal.set_title(f"Calibration (slope {slope:.2f}, int {inter:.2f})",
@@ -938,7 +1167,7 @@ def plot_classification(
                     names[list(classes).index([c for c in classes if c != pos][0])]
                 a_dist.hist(d, bins=30, alpha=.55, density=True, color=col,
                             label=f"{nm} (n={len(d):,})")
-            a_dist.axvline(threshold, color="black", ls="--", lw=1.4,
+            a_dist.axvline(threshold, color=NEUTRAL, ls="--", lw=1.4,
                            label=f"threshold = {threshold:g}")
             a_dist.set_xlabel("predicted probability")
             a_dist.set_ylabel("density")
@@ -953,7 +1182,7 @@ def plot_classification(
                                ("precision", PALETTE[2], "--"),
                                ("f1", PALETTE[4], ":")]:
                 a_thr.plot(sw["threshold"], sw[c], color=col, ls=ls, lw=1.8, label=c)
-            a_thr.axvline(threshold, color="black", ls="--", lw=1.2)
+            a_thr.axvline(threshold, color=NEUTRAL, ls="--", lw=1.2)
             a_thr.axvline(sw.attrs["best_f1"], color=GOOD, ls=":", lw=1.6,
                           label=f"best F1 @ {sw.attrs['best_f1']:.3f}")
             a_thr.set_xlabel("threshold"); a_thr.set_ylabel("score")
@@ -995,6 +1224,37 @@ def plot_calibration(
     ``quantile`` binning is the default because uniform bins leave the
     top deciles almost empty on imbalanced data, producing a curve that
     swings wildly on three observations.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    probas : Union[array-like, Dict[str, array-like]]
+        Mapping of model names to positive-class probability vectors, all
+        aligned with y_true.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    n_bins : int, default 10
+        Number of calibration bins used to summarize predicted versus observed
+        probabilities.
+    strategy : Literal['quantile', 'uniform'], default 'quantile'
+        Calibration binning strategy: uniform probability widths or quantile
+        bins.
+    figsize : Tuple[float, float], default (11, 4.5)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     from sklearn.calibration import calibration_curve
@@ -1009,9 +1269,9 @@ def plot_calibration(
     with _style():
         fig, (a1, a2) = plt.subplots(1, 2, figsize=figsize,
                                      gridspec_kw={"width_ratios": [1.1, 1]})
-        a1.plot([0, 1], [0, 1], "k--", lw=1.3, label="perfectly calibrated")
+        a1.plot([0, 1], [0, 1], "--", color=NEUTRAL, lw=1.3, label="perfectly calibrated")
         for i, (name, p) in enumerate(probas.items()):
-            p = np.clip(_proba_1d(p), 0, 1)
+            p = _binary_proba(p, y_true, pos_label)
             col = PALETTE[i % len(PALETTE)]
             nb = min(n_bins, max(3, int(yb.sum() // 5)))
             frac, mean_p = calibration_curve(yb, p, n_bins=nb, strategy=strategy)
@@ -1046,6 +1306,33 @@ def plot_decision_curve(
     plausibly use, does the model's curve sit above both the treat-all
     diagonal and the treat-none horizontal?  If not, the model is not worth
     acting on however good its AUC looks.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    probas : Union[array-like, Dict[str, array-like]]
+        Mapping of model names to positive-class probability vectors, all
+        aligned with y_true.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    max_threshold : float, default 0.6
+        Largest probability cutoff displayed on the decision curve.
+    figsize : Tuple[float, float], default (8, 5)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     y_true = _as_array(y_true)
@@ -1063,7 +1350,7 @@ def plot_decision_curve(
             if first:
                 ax.plot(dc.threshold_prob, dc.net_benefit_treat_all, "--",
                         color=NEUTRAL, lw=1.6, label="treat all")
-                ax.axhline(0, color="black", lw=1.2, label="treat none")
+                ax.axhline(0, color=NEUTRAL, lw=1.2, label="treat none")
                 first = False
         ax.set_xlabel("threshold probability (risk level for acting)")
         ax.set_ylabel("net benefit")
@@ -1100,6 +1387,39 @@ def compare_models(
     result.
 
     >>> ev.compare_models(y_test, {"rf": p_rf, "lgbm": p_lgb, "logreg": p_lr}, ci=True)
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    predictions : Dict[str, array-like]
+        Mapping of model names to predictions or prediction/probability
+        dictionaries; see examples above.
+    task : Literal['auto', 'classification', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    threshold : float, default 0.5
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    ci : bool, default False
+        Request bootstrap confidence intervals for supported metrics. This adds
+        repeated metric computation.
+    n_boot : int, default 300
+        Number of paired bootstrap resamples used to estimate metric
+        uncertainty.
+    sort_by : Optional[str], default None
+        Result column or metric used for ranking the output table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     y_true = _as_array(y_true)
     if task == "auto":
@@ -1111,7 +1431,7 @@ def compare_models(
     for name, pred in predictions.items():
         pred = np.asarray(pred)
         if task == "classification":
-            p1 = _proba_1d(pred) if pred.ndim == 2 or np.issubdtype(pred.dtype, np.floating) \
+            p1 = _binary_proba(pred, y_true, pos_label) if pred.ndim == 2 or np.issubdtype(pred.dtype, np.floating) \
                 else None
             if p1 is not None and set(np.unique(p1)) <= {0, 1}:
                 p1 = None
@@ -1169,6 +1489,34 @@ def error_analysis(
     ``min_group`` are flagged rather than trusted.
 
     >>> ev.error_analysis(X_test, y_test, preds).head(10)
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : array-like
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    task : Literal['auto', 'classification', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    bins : int, default 4
+        Number of bins, explicit edges, or supported automatic binning rule as
+        indicated by the signature.
+    min_group : int, default 20
+        Minimum number of observations required for a subgroup error summary.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     y_true, y_pred = _check_pair(y_true, y_pred)
     if len(X) != len(y_true):
@@ -1251,6 +1599,30 @@ def score_clustering(
     ``ari``, ``nmi``, ``v_measure``, ``homogeneity``, ``completeness``
                             external, only when ``true_labels`` is given
     ``cluster_balance``     size of the smallest cluster over the largest
+
+    Parameters
+    ----------
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    labels : array-like
+        Explicit class or bin labels, in the order expected by the operation.
+    true_labels : Optional[array-like], default None
+        Optional reference cluster labels for external agreement metrics.
+    noise_label : int, default -1
+        Cluster label marking noise observations, excluded from internal cluster
+        metrics.
+    sample : Optional[int], default 10000
+        Maximum number of observations sampled for plotting or expensive
+        diagnostics.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from sklearn.metrics import (adjusted_rand_score, calinski_harabasz_score,
                                  davies_bouldin_score, homogeneity_completeness_v_measure,
@@ -1352,6 +1724,40 @@ def plot_clustering(
     The silhouette profile (right panel) is the most informative of the
     three: a cluster whose bar dips below zero contains points that would
     be better placed elsewhere.
+
+    Parameters
+    ----------
+    X : object
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    labels : array-like
+        Explicit class or bin labels, in the order expected by the operation.
+    true_labels : Optional[array-like], default None
+        Optional reference cluster labels for external agreement metrics.
+    noise_label : int, default -1
+        Cluster label marking noise observations, excluded from internal cluster
+        metrics.
+    method : Literal['pca', 'tsne', 'umap'], default 'pca'
+        Algorithm to use; see the supported methods and assumptions above.
+    scale : bool, default True
+        Standardize numeric inputs before this operation when True.
+    sample : Optional[int], default 5000
+        Maximum number of observations sampled for plotting or expensive
+        diagnostics.
+    figsize : Tuple[float, float], default (15, 4.6)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     from sklearn.decomposition import PCA
@@ -1429,7 +1835,7 @@ def plot_clustering(
                     a3.text(-0.05, y0 + len(vals) / 2, str(lv), fontsize=8, va="center")
                     y0 += len(vals) + max(5, len(sv) // 100)
                 a3.axvline(avg, color=BAD, ls="--", lw=1.5, label=f"mean = {avg:.3f}")
-                a3.axvline(0, color="black", lw=.8)
+                a3.axvline(0, color=NEUTRAL, lw=.8)
                 a3.set_xlabel("silhouette coefficient")
                 a3.set_yticks([])
                 a3.set_title("Silhouette profile", fontweight="bold", fontsize=11)
@@ -1489,6 +1895,22 @@ def find_best_k(
     sample : int, optional
         Silhouette is O(n^2) in memory; above this many rows it is computed
         on a random subsample rather than hanging.
+    k_range : Sequence[int], default range(2, 11)
+        Candidate numbers of clusters to evaluate.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    exclude : Optional[Sequence[str]], default None
+        Columns excluded from automatic feature selection.
+    scale : bool, default True
+        Standardize numeric inputs before this operation when True.
+    metrics : Sequence[str], default ('inertia', 'silhouette', 'davies_bouldin', 'calinski_harabasz')
+        Metrics to calculate, or a metrics table to store, as indicated by the
+        signature.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
 
     Returns
     -------
@@ -1528,7 +1950,7 @@ def find_best_k(
     if n_nan:
         raise ValueError(
             f"{n_nan} row(s) contain missing values. Clustering cannot handle NaN -- "
-            f"impute first (datakit.fix_missing) or drop those rows."
+            f"impute first (NaviLib.fix_missing) or drop those rows."
         )
 
     Xs = StandardScaler().fit_transform(Xa) if scale else Xa
@@ -1694,6 +2116,26 @@ def plot_k_search(
 
     Pass ``X`` (the same data given to :func:`find_best_k`) to get the two
     bottom panels; without it only the two curves are drawn.
+
+    Parameters
+    ----------
+    result : Dict[str, Any]
+        Result dictionary returned by find_best_k.
+    X : optional, default None
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    figsize : Tuple[float, float], default (14, 9)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     from sklearn.decomposition import PCA
@@ -1746,7 +2188,7 @@ def plot_k_search(
                 y0 += len(vals) + max(5, len(sv) // 100)
             a3.axvline(sv.mean(), color=BAD, ls="--", lw=1.5,
                        label=f"mean {sv.mean():.3f}")
-            a3.axvline(0, color="black", lw=.8)
+            a3.axvline(0, color=NEUTRAL, lw=.8)
             a3.set_xlabel("silhouette coefficient"); a3.set_yticks([])
             a3.set_title(f"Silhouette profile (k={k})", fontweight="bold", fontsize=11)
             a3.legend(fontsize=8)
@@ -1810,6 +2252,25 @@ def score_ranking(
 
     Metrics: ``precision@k``, ``recall@k``, ``map@k``, ``mrr``, ``ndcg@k``,
     ``hit_rate@k``, plus ``n_queries`` and mean relevant-per-query.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    query_col : str
+        Column identifying the retrieval query or user.
+    true_col : str
+        Column containing true relevance values.
+    pred_col : str
+        Column containing predicted ranking scores; larger scores rank first.
+    k : Union[int, Sequence[int]], default 10
+        Top-k cutoff, or a sequence of cutoffs when supported.
+
+
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     missing = {query_col, true_col, pred_col} - set(df.columns)
     if missing:
@@ -1908,6 +2369,24 @@ def score_recommender(
         zero, rather than dropping them.  Dropping them silently inflates
         every metric -- the original behaviour, and a common way to report
         a recall that the system does not actually achieve.
+    recommended : Dict[Any, Sequence]
+        Mapping of users to ranked recommended item IDs, best first.
+    ground_truth : Dict[Any, Sequence]
+        Mapping of users to sets/sequences of relevant item IDs.
+    k : Union[int, Sequence[int]], default 10
+        Top-k cutoff, or a sequence of cutoffs when supported.
+    catalog : Optional[Sequence], default None
+        Optional complete collection of catalog item IDs for coverage metrics.
+    popularity : Optional[Dict[Any, float]], default None
+        Optional item popularity mapping for novelty metrics.
+
+
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     ks = [k] if isinstance(k, (int, np.integer)) else list(k)
     if any(x <= 0 for x in ks):
@@ -2011,6 +2490,25 @@ def plot_ranking(
     With several cut-offs the metrics are drawn as curves against K, which
     is the shape you actually need to choose an operating K.  With a single
     K it falls back to a labelled bar chart.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Ranking metric table, or named collection of ranking results.
+    title : str, default 'Ranking metrics'
+        Custom title shown above the chart or report.
+    figsize : Tuple[float, float], default (11, 4.5)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     cols = [c for c in results.columns
@@ -2086,6 +2584,41 @@ def report_classification(
 
     Returns a dict with ``metrics``, ``per_class``, ``thresholds``,
     ``decision_curve`` and ``figures``.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : Optional[array-like], default None
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    y_prob : Optional[array-like], default None
+        Predicted probabilities. A binary vector must refer to pos_label; a
+        matrix follows class order. Multiclass matrices have one column per
+        class.
+    pos_label : optional, default None
+        Positive class label. None uses the last sorted observed class, matching
+        scikit-learn predict_proba column order. A 1-D probability vector must
+        correspond to this label.
+    threshold : float, default 0.5
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    class_names : Optional[Sequence[str]], default None
+        Display names for classes, following the supplied/derived class order.
+    ci : bool, default True
+        Request bootstrap confidence intervals for supported metrics. This adds
+        repeated metric computation.
+    plots : bool, default True
+        Include diagnostic figures alongside the numerical report.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    dict
+        Classification scores, class-level details and optional diagnostic
+        figure.
     """
     y_true = _as_array(y_true)
     classes = np.unique(y_true)
@@ -2096,7 +2629,7 @@ def report_classification(
     if y_pred is None and binary and y_prob is not None:
         pos = _resolve_pos_label(y_true, pos_label)
         neg = [c for c in classes if c != pos][0]
-        y_pred = np.where(_proba_1d(y_prob) >= threshold, pos, neg)
+        y_pred = np.where(_binary_proba(y_prob, y_true, pos_label) >= threshold, pos, neg)
 
     out: Dict[str, Any] = {"metrics": m}
     out["per_class"] = per_class_report(y_true, y_pred, class_names=class_names)
@@ -2161,7 +2694,29 @@ def report_regression(
     plots: bool = True,
     show: bool = True,
 ) -> Dict[str, Any]:
-    """Full regression evaluation: metrics against a naive baseline, plots, verdict."""
+    """Full regression evaluation: metrics against a naive baseline, plots, verdict.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    y_pred : array-like
+        Predicted labels or numeric outcomes, positionally aligned with y_true.
+    ci : bool, default True
+        Request bootstrap confidence intervals for supported metrics. This adds
+        repeated metric computation.
+    plots : bool, default True
+        Include diagnostic figures alongside the numerical report.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    dict
+        Regression scores and optional diagnostic figure.
+    """
     m = score_regression(y_true, y_pred, ci=ci)
     y_true, y_pred = _check_pair(y_true, y_pred)
     resid = y_true - y_pred

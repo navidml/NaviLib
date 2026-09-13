@@ -20,6 +20,27 @@ Version: 1.2
 from typing import Any, Dict, List, Optional, Tuple, Union
 from itertools import combinations
 import re
+from functools import wraps
+
+from ._common import _style, PALETTE
+
+
+def _themed_test(fn):
+    """Scope statistical figures and retain handles in result dictionaries."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _style():
+            before = set(plt.get_fignums())
+            try:
+                result = fn(*args, **kwargs)
+                figures = [plt.figure(n) for n in plt.get_fignums() if n not in before]
+                if isinstance(result, dict):
+                    result["figures"] = figures
+                return result
+            finally:
+                for n in set(plt.get_fignums()) - before:
+                    plt.close(n)
+    return wrapped
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,7 +63,8 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd
 # 1. NORMALITY TEST
 # ==============================================================================
 
-def normality_test(
+@_themed_test
+def test_normality(
     df: pd.DataFrame,
     column: str,
     method: str = "shapiro",
@@ -52,8 +74,7 @@ def normality_test(
     bins: int = 30,
     show_plot: bool = True
 ) -> Dict[str, Any]:
-    """
-    Performs a normality test on a given column, visualizes the distribution,
+    """Performs a normality test on a given column, visualizes the distribution,
     and returns a complete statistical report.
 
     Parameters
@@ -85,7 +106,11 @@ def normality_test(
         Full statistical report including:
         - column, method, statistic, p_value, alpha, interpretation
     """
-    data = df[column].dropna()
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be in (0, 1).")
+    data = pd.to_numeric(df[column], errors="raise").dropna()
+    if not np.isfinite(data).all() or data.nunique() < 2:
+        raise ValueError("Normality testing requires finite, nonconstant observations.")
 
     if len(data) < 3:
         raise ValueError("Need at least 3 observations for normality test.")
@@ -96,27 +121,33 @@ def normality_test(
         test_name = "Shapiro-Wilk Test"
 
     elif method == "dagostino":
+        if len(data) < 8:
+            raise ValueError("D'Agostino's test needs at least 8 observations.")
         stat, p = stats.normaltest(data)
         test_name = "D'Agostino K² Test"
 
     elif method == "ks":
-        data_norm = (data - data.mean()) / data.std()
-        stat, p = stats.kstest(data_norm, "norm")
-        test_name = "Kolmogorov-Smirnov Test"
+        from statsmodels.stats.diagnostic import lilliefors
+        stat, p = lilliefors(data, dist="norm")
+        test_name = "Lilliefors Test (estimated normal parameters)"
 
     elif method == "anderson":
-        result = stats.anderson(data, dist="norm")
+        import inspect
+        modern = "method" in inspect.signature(stats.anderson).parameters
+        result = (stats.anderson(data, dist="norm", method="interpolate")
+                  if modern else stats.anderson(data, dist="norm"))
         test_name = "Anderson-Darling Test"
         stat = result.statistic
-        crit_vals = result.critical_values
-        sig_levels = result.significance_level
-        p = None
+        p = float(result.pvalue) if modern else None
+        if not modern:
+            crit_vals = result.critical_values
+            sig_levels = result.significance_level
 
     else:
         raise ValueError("Invalid method! Choose: shapiro, dagostino, ks, anderson")
 
     # ---- 2) Interpretation ----
-    if method != "anderson":
+    if p is not None:
         interpretation = (
             "Reject H0: data is NOT normal"
             if p < alpha else
@@ -124,7 +155,9 @@ def normality_test(
         )
     else:
         alpha_idx = {0.15: 0, 0.10: 1, 0.05: 2, 0.025: 3, 0.01: 4}
-        idx = alpha_idx.get(alpha, 2)
+        if alpha not in alpha_idx:
+            raise ValueError("Anderson alpha must be one of 0.15, 0.10, 0.05, 0.025, 0.01.")
+        idx = alpha_idx[alpha]
         passed = stat < crit_vals[idx]
         interpretation = (
             "Fail to reject H0: data appears normal"
@@ -135,10 +168,10 @@ def normality_test(
     # ---- 3) Visualization ----
     if show_plot:
         plt.figure(figsize=figsize)
-        plt.hist(data, bins=bins, alpha=0.6, color="#4C72B0", density=True, label="Histogram")
+        plt.hist(data, bins=bins, alpha=0.6, color=PALETTE[0], density=True, label="Histogram")
 
         if kde:
-            data.plot(kind="kde", color="red", label="KDE Curve")
+            data.plot(kind="kde", color=PALETTE[1], label="KDE Curve")
 
         plt.title(f"Distribution Plot: {column}")
         plt.xlabel(column)
@@ -164,7 +197,7 @@ def normality_test(
         "n_observations": int(len(data))
     }
 
-    if method == "anderson":
+    if method == "anderson" and p is None:
         report["critical_values"] = crit_vals.tolist()
         report["significance_levels"] = sig_levels.tolist()
 
@@ -175,7 +208,8 @@ def normality_test(
 # 2. VARIANCE HOMOGENEITY TEST
 # ==============================================================================
 
-def variance_homogeneity_test(
+@_themed_test
+def test_equal_variance(
     df: pd.DataFrame,
     value_col: str,
     group_col: str,
@@ -184,8 +218,7 @@ def variance_homogeneity_test(
     show_plot: bool = True,
     figsize: Tuple[int, int] = (8, 5)
 ) -> Dict[str, Any]:
-    """
-    Performs a variance homogeneity test (equal variances across groups),
+    """Performs a variance homogeneity test (equal variances across groups),
     visualizes group distributions, and returns a full statistical report.
 
     Parameters
@@ -242,7 +275,7 @@ def variance_homogeneity_test(
 
     if show_plot:
         plt.figure(figsize=figsize)
-        sns.boxplot(data=df, x=group_col, y=value_col, palette="Set2")
+        sns.boxplot(data=df, x=group_col, y=value_col, color=PALETTE[0])
         plt.title(f"Boxplot of {value_col} across {group_col} groups")
         plt.tight_layout()
         plt.show()
@@ -263,7 +296,7 @@ def variance_homogeneity_test(
 # 3. PARAMETRIC TEST
 # ==============================================================================
 
-def parametric_test(
+def test_parametric(
     df: pd.DataFrame,
     test: str,
     value: str,
@@ -273,8 +306,7 @@ def parametric_test(
     mu: float = 0,
     alpha: float = 0.05
 ) -> Dict[str, Any]:
-    """
-    Universal parametric hypothesis testing engine.
+    """Universal parametric hypothesis testing engine.
 
     Supported tests:
         - "one_sample"      : One-sample t-test
@@ -467,7 +499,8 @@ def parametric_test(
 # 4. NONPARAMETRIC TEST
 # ==============================================================================
 
-def nonparametric_test(
+@_themed_test
+def test_nonparametric(
     df: pd.DataFrame,
     test: str,
     value_col: str,
@@ -478,8 +511,7 @@ def nonparametric_test(
     show_plot: bool = True,
     figsize: Tuple[int, int] = (7, 5)
 ) -> Dict[str, Any]:
-    """
-    Universal non-parametric test engine.
+    """Universal non-parametric test engine.
 
     Supports:
     - "wilcoxon_one_sample" : Wilcoxon signed-rank (one-sample)
@@ -678,7 +710,8 @@ def nonparametric_test(
 # 5. CORRELATION TEST
 # ==============================================================================
 
-def correlation_test(
+@_themed_test
+def test_correlation(
     df: pd.DataFrame,
     test: str,
     x: str,
@@ -688,8 +721,7 @@ def correlation_test(
     show_plot: bool = True,
     figsize: Tuple[int, int] = (6, 5)
 ) -> Dict[str, Any]:
-    """
-    Correlation analysis engine.
+    """Correlation analysis engine.
 
     Supports:
     - "pearson" : Pearson correlation
@@ -746,7 +778,12 @@ def correlation_test(
         model_y = sm.OLS(data[y], X1).fit()
         residual_y = model_y.resid
 
-        r, p = pearsonr(residual_x, residual_y)
+        r = float(pearsonr(residual_x, residual_y).statistic)
+        dof = len(data) - np.linalg.matrix_rank(X1) - 1
+        if dof <= 0:
+            raise ValueError("Insufficient residual degrees of freedom for partial correlation.")
+        t_stat = abs(r) * np.sqrt(dof / max(1 - r**2, np.finfo(float).eps))
+        p = float(2 * stats.t.sf(t_stat, dof))
 
     else:
         raise ValueError("Invalid test type. Choose: pearson, spearman, kendall, partial")
@@ -776,8 +813,7 @@ def find_correlated_features(
     alpha: float = 0.05,
     min_abs_corr: float = 0.3
 ) -> pd.DataFrame:
-    """
-    Find correlations between all feature pairs using correlation_test.
+    """Find correlations between all feature pairs using correlation_test.
 
     Parameters
     ----------
@@ -838,8 +874,7 @@ def feature_correlation_analysis(
     rare_threshold: float = 0.005,
     drop_constant: bool = True
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """
-    Analyze feature correlations with support for one-hot encoded features.
+    """Analyze feature correlations with support for one-hot encoded features.
 
     Parameters
     ----------
@@ -937,7 +972,8 @@ def feature_correlation_analysis(
 # 6. CATEGORICAL TEST
 # ==============================================================================
 
-def categorical_test(
+@_themed_test
+def test_categorical(
     df: pd.DataFrame,
     test: str,
     col1: Optional[str] = None,
@@ -947,8 +983,7 @@ def categorical_test(
     show_plot: bool = True,
     figsize: Tuple[int, int] = (6, 5)
 ) -> Dict[str, Any]:
-    """
-    Categorical Data Test Engine.
+    """Categorical Data Test Engine.
 
     Supports:
     - "chi_square_independence" : Chi-square Test of Independence
@@ -1025,6 +1060,13 @@ def categorical_test(
         if len(observed) != len(expected):
             raise ValueError("Length of observed and expected must match.")
 
+        expected = np.asarray(expected, dtype=float)
+        if not np.isfinite(expected).all() or (expected <= 0).any():
+            raise ValueError("Expected counts/proportions must be finite and positive.")
+        if np.isclose(expected.sum(), 1):
+            expected = expected * observed.sum()
+        if not np.isclose(expected.sum(), observed.sum()):
+            raise ValueError("Expected counts must sum to observed count, or proportions must sum to 1.")
         chi2, p = chisquare(f_obs=observed.values, f_exp=expected)
 
         interpretation = (
@@ -1174,8 +1216,7 @@ def effect_size(
     value_col: Optional[str] = None,
     group_col: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Effect Size Calculator
+    """Effect Size Calculator
 
     Supports:
     - "cohens_d" : Cohen's d (for two groups)
@@ -1384,8 +1425,7 @@ def tukey_hsd_posthoc(
     group_col: str,
     alpha: float = 0.05
 ) -> pd.DataFrame:
-    """
-    Perform Tukey HSD post-hoc test after ANOVA.
+    """Perform Tukey HSD post-hoc test after ANOVA.
 
     Parameters
     ----------
@@ -1423,3 +1463,52 @@ __all__ = [
     "effect_size",
     "tukey_hsd_posthoc",
 ]
+
+
+# Compatibility aliases: existing notebooks remain supported.
+normality_test = test_normality
+variance_homogeneity_test = test_equal_variance
+parametric_test = test_parametric
+nonparametric_test = test_nonparametric
+correlation_test = test_correlation
+categorical_test = test_categorical
+__all__ += ['test_normality', 'test_equal_variance', 'test_parametric', 'test_nonparametric', 'test_correlation', 'test_categorical']
+
+
+def adjust_pvalues(p_values, *, method: str = "fdr_bh", alpha: float = .05) -> pd.DataFrame:
+    """Correct a family of hypothesis tests while preserving missing results.
+
+    Parameters
+    ----------
+    p_values : one-dimensional array-like or pandas.Series
+        Raw p-values in [0, 1]. NaNs remain missing and are excluded from the
+        correction family; a Series index is preserved.
+    method : {'fdr_bh', 'fdr_by', 'holm', 'bonferroni'}, default 'fdr_bh'
+        Benjamini-Hochberg/BY false-discovery control, or Holm/Bonferroni
+        family-wise error control. BH assumes independence or suitable positive
+        dependence; BY accommodates arbitrary dependence.
+    alpha : float, default 0.05
+        Rejection level in (0, 1).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns p_value, p_adjusted, reject. Missing tests have reject=False.
+        All tests in the intended family must be supplied together.
+    """
+    from statsmodels.stats.multitest import multipletests
+    if method not in {"fdr_bh", "fdr_by", "holm", "bonferroni"} or not 0 < alpha < 1:
+        raise ValueError("Choose a supported correction method and alpha in (0, 1).")
+    p = pd.Series(p_values, dtype=float)
+    valid = p.notna()
+    if not np.isfinite(p[valid]).all() or not p[valid].between(0, 1).all():
+        raise ValueError("p-values must be in [0, 1] or missing.")
+    result = pd.DataFrame({"p_value": p, "p_adjusted": np.nan, "reject": False})
+    if valid.any():
+        reject, adjusted, _, _ = multipletests(p[valid].to_numpy(), alpha=alpha, method=method)
+        result.loc[valid, "p_adjusted"] = adjusted
+        result.loc[valid, "reject"] = reject
+    return result
+
+
+__all__ += ["adjust_pvalues"]

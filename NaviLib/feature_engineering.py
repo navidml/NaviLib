@@ -5,7 +5,7 @@ features
 Feature engineering: numeric transforms, scaling, encoding, binning, and
 derived features (datetime, cyclical, interactions, group aggregates, text).
 
-Companion to ``datakit`` (cleaning + imbalance), ``eda`` (exploration) and
+Companion to ``NaviLib`` (cleaning + imbalance), ``eda`` (exploration) and
 ``evaluate`` (metrics).
 
 The one rule this module exists to enforce
@@ -24,10 +24,10 @@ transformation on new data.
 >>> train, s1 = fe.transform_numeric(train, "income", method="auto", return_state=True)
 >>> train, s2 = fe.encode(train, ["city"], method="target", target="y", return_state=True)
 >>> train, s3 = fe.scale(train, method="standard", exclude=["y"], return_state=True)
->>> test = fe.apply_state(test, [s1, s2, s3])          # exactly the same maths
+>>> test = nv.apply_state(test, [s1, s2, s3])          # exactly the same maths
 >>> fe.summary([s1, s2, s3])                            # what did I actually do?
 
-Author: rebuilt from navdata
+Author: rebuilt from NaviLib
 License: MIT
 """
 
@@ -40,12 +40,12 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-__version__ = "2.0.0"
+from ._version import __version__
 
 Frame = pd.DataFrame
 
 #: State kinds this module fits and can replay. Registered with the
-#: package-level dispatcher in ``navdata/__init__.py``.
+#: package-level dispatcher in ``NaviLib/__init__.py``.
 FEATURE_STATE_KINDS = ('transform', 'scale', 'bin', 'encode', 'datetime', 'cyclical', 'interactions', 'aggregates', 'text')
 Series = pd.Series
 
@@ -88,7 +88,7 @@ def _check_no_nan(s: Series, col: str, what: str) -> None:
     if s.isna().any():
         raise ValueError(
             f"{what} cannot handle the {int(s.isna().sum())} missing value(s) in "
-            f"'{col}'. Impute first (datakit.fix_missing) or pass "
+            f"'{col}'. Impute first (NaviLib.fix_missing) or pass "
             f"skip_missing=True to leave them as NaN."
         )
 
@@ -258,6 +258,24 @@ def transform_numeric(
         exact lambda / quantile map on unseen data.  **Without this the
         transform is not reproducible** -- a fresh Box-Cox on the test set
         fits a different lambda and puts it on a different scale.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Union[str, Literal['auto']], default 'auto'
+        Algorithm to use; see the supported methods and assumptions above.
+    candidates : Optional[Sequence[str]], default None
+        Transform methods evaluated by automatic transformation selection.
+    suffix : Optional[str], default None
+        Suffix for generated column names when the original column is retained.
+    min_skew : float, default 0.5
+        Minimum absolute skewness before automatic transformation is attempted.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    verbose : bool, default False
+        Print a concise progress/result summary when True.
 
     Returns
     -------
@@ -340,7 +358,7 @@ def transform_numeric(
 #  2. SCALING
 # ======================================================================
 
-def scale(
+def scale_features(
     df: Frame,
     columns=None,
     method: Literal["standard", "minmax", "robust", "maxabs", "l2", "none"] = "standard",
@@ -376,6 +394,40 @@ def scale(
     -----
     Unlike the original, this does not raise on missing values: NaN is
     preserved through the transform so you can decide when to impute.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['standard', 'minmax', 'robust', 'maxabs', 'l2', 'none'], default 'standard'
+        Algorithm to use; see the supported methods and assumptions above.
+    exclude : Optional[Sequence[str]], default None
+        Columns excluded from automatic feature selection.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    feature_range : Tuple[float, float], default (0, 1)
+        Lower and upper output bounds for min-max scaling.
+    quantile_range : Tuple[float, float], default (25.0, 75.0)
+        Lower and upper percentile bounds used by robust scaling.
+    replace : bool, default True
+        Overwrite selected source columns in the returned copy instead of
+        creating suffixed columns.
+    suffix : str, default 'scaled'
+        Suffix for generated column names when the original column is retained.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     from sklearn.preprocessing import (MaxAbsScaler, MinMaxScaler, Normalizer,
                                        RobustScaler, StandardScaler)
@@ -466,6 +518,43 @@ def bin_numeric(
     Edges are stored in the state and extended to +/- infinity at replay
     time, so a test-set value outside the training range lands in the
     nearest bin instead of becoming NaN.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['quantile', 'uniform', 'kmeans', 'custom', 'tree'], default 'quantile'
+        Algorithm to use; see the supported methods and assumptions above.
+    bins : Union[int, Sequence[float]], default 5
+        Number of bins, explicit edges, or supported automatic binning rule as
+        indicated by the signature.
+    labels : Optional[Sequence[str]], default None
+        Explicit class or bin labels, in the order expected by the operation.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    as_category : bool, default True
+        Return categorical interval/label columns instead of numeric bin codes.
+    replace : bool, default False
+        Overwrite selected source columns in the returned copy instead of
+        creating suffixed columns.
+    suffix : str, default 'bin'
+        Suffix for generated column names when the original column is retained.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     cols = _cols(df, columns, numeric_only=True, exclude=[target] if target else None)
     if not cols:
@@ -532,7 +621,7 @@ def bin_numeric(
 #  4. CATEGORICAL ENCODING
 # ======================================================================
 
-def encode(
+def encode_categorical(
     df: Frame,
     columns=None,
     method: Literal["onehot", "ordinal", "count", "frequency",
@@ -602,6 +691,42 @@ def encode(
     dummy_na : bool, default True
         Give missing values their own indicator rather than dropping them
         silently.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['onehot', 'ordinal', 'count', 'frequency', 'target', 'woe', 'hashing', 'binary'], default 'onehot'
+        Algorithm to use; see the supported methods and assumptions above.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    order : Optional[Dict[str, Sequence]], default None
+        Mapping from column name to explicitly ordered category levels for
+        ordinal/binary encoding.
+    other_label : str, default '__other__'
+        Replacement category assigned to infrequent or unseen levels when
+        grouping applies.
+    drop_first : bool, default False
+        Drop the first sorted one-hot level to avoid a redundant indicator.
+    n_components : int, default 8
+        Number of output dimensions for hashing or the selected projection.
+    cv : int, default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    smoothing : float, default 20.0
+        Nonnegative pseudo-count strength shrinking rare category estimates
+        toward the training-fold prior.
+    drop_original : bool, default True
+        Remove source columns from the transformed copy after deriving new
+        features.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
 
     Returns
     -------
@@ -798,7 +923,9 @@ def _woe_encode(s: Series, yb: np.ndarray, cv: int, smoothing: float,
 
     n = len(s)
     oof = np.zeros(n)
-    splitter = StratifiedKFold(min(cv, int(min(np.bincount(yb)))) or 2,
+    if cv < 2 or min(np.bincount(yb, minlength=2)) < 2:
+        raise ValueError("Out-of-fold WOE encoding needs cv >= 2 and at least two rows per class.")
+    splitter = StratifiedKFold(min(cv, int(min(np.bincount(yb)))),
                                shuffle=True, random_state=random_state)
 
     def _fit(keys, yy):
@@ -811,12 +938,9 @@ def _woe_encode(s: Series, yb: np.ndarray, cv: int, smoothing: float,
               (tot_neg + smoothing)
         return np.log(pos / neg).to_dict()
 
-    try:
-        for tr, te in splitter.split(np.arange(n), yb):
-            m = _fit(s.iloc[tr].to_numpy(), yb[tr])
-            oof[te] = s.iloc[te].map(m).fillna(0.0).to_numpy()
-    except ValueError:
-        oof = s.map(_fit(s.to_numpy(), yb)).fillna(0.0).to_numpy()
+    for tr, te in splitter.split(np.arange(n), yb):
+        m = _fit(s.iloc[tr].to_numpy(), yb[tr])
+        oof[te] = s.iloc[te].map(m).fillna(0.0).to_numpy()
     return oof, _fit(s.to_numpy(), yb), 0.0
 
 
@@ -837,7 +961,7 @@ def _hash_matrix(s: Series, n_components: int) -> np.ndarray:
 #  5. DERIVED FEATURES
 # ======================================================================
 
-def add_datetime(
+def add_datetime_features(
     df: Frame,
     columns=None,
     parts: Sequence[str] = ("year", "month", "day", "dayofweek", "hour",
@@ -858,19 +982,47 @@ def add_datetime(
     ``reference`` adds a ``<col>_days_since`` column measured from a fixed
     date or another datetime column, which is usually the feature that
     actually carries signal (account age, time since last visit).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    parts : Sequence[str], default ('year', 'month', 'day', 'dayofweek', 'hour', 'quarter', 'is_weekend', 'is_month_end')
+        Names of datetime/text components to derive; see the supported
+        components above.
+    cyclical : bool, default True
+        Also emit sine/cosine pairs for periodic datetime components.
+    reference : Optional[Union[str, pd.Timestamp]], default None
+        Reference dataset or datetime baseline, depending on this operation.
+    drop_original : bool, default False
+        Remove source columns from the transformed copy after deriving new
+        features.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     cols = _cols(df, columns)
     dt_cols = []
     for c in cols:
         if pd.api.types.is_datetime64_any_dtype(df[c]):
             dt_cols.append(c)
-        elif df[c].dtype == object:
+        elif pd.api.types.is_string_dtype(df[c].dtype) or df[c].dtype == object:
             parsed = pd.to_datetime(df[c], errors="coerce")
             if parsed.notna().mean() > 0.8:
                 dt_cols.append(c)
     if not dt_cols:
         raise ValueError("No datetime-like columns found. Convert with "
-                         "datakit.convert(df, col, to='datetime') first.")
+                         "NaviLib.convert(df, col, to='datetime') first.")
 
     out = df.copy()
     created: Dict[str, List[str]] = {}
@@ -922,13 +1074,35 @@ def add_datetime(
     return (out, state) if return_state else out
 
 
-def add_cyclical(df: Frame, column: str, period: float,
+def add_cyclical_features(df: Frame, column: str, period: float,
                  drop_original: bool = False, return_state: bool = False):
     """Encode any periodic numeric column as a sin/cos pair.
 
     For angles (``period=360``), compass bearings, day-of-year
     (``period=365.25``), or anything else where the largest value is
     adjacent to the smallest.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    column : str
+        Name of the source column to inspect or transform.
+    period : float
+        Positive cycle length in the same units as the numeric input.
+    drop_original : bool, default False
+        Remove source columns from the transformed copy after deriving new
+        features.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     if column not in df.columns:
         raise KeyError(f"Column '{column}' not found.")
@@ -967,6 +1141,34 @@ def add_interactions(
     ``divide``    a / b, guarded against division by zero, plus b / a
     ``add``       a + b
     ``subtract``  a - b (useful for dates-as-numbers, prices, scores)
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    degree : int, default 2
+        Maximum polynomial interaction degree.
+    operations : Sequence[str], default ('multiply',)
+        Interaction operations to generate from the selected numeric features.
+    max_features : int, default 200
+        Upper bound on generated interaction features to control dimensional
+        growth.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     from itertools import combinations
 
@@ -1035,6 +1237,31 @@ def add_aggregates(
     The fitted group table is stored in the state, so at transform time a
     test row belonging to an unseen group gets the global statistic instead
     of NaN.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    group : Union[str, Sequence[str]]
+        Column name or names defining groups for the operation.
+    values : Union[str, Sequence[str]]
+        Numeric measurement columns to aggregate within groups.
+    funcs : Sequence[str], default ('mean', 'std', 'min', 'max', 'count')
+        Aggregation functions learned on training groups, such as mean, median
+        or count.
+    add_deviation : bool, default True
+        Also add the difference between each measurement and its fitted group
+        mean.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     groups = [group] if isinstance(group, str) else list(group)
     vals = [values] if isinstance(values, str) else list(values)
@@ -1087,6 +1314,30 @@ def add_text_features(
     signal in tabular problems -- message length, digit density and
     capitalisation are classic spam and fraud indicators, and they cost
     nothing to compute.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    parts : Sequence[str], default ('length', 'n_words', 'n_digits', 'n_upper', 'n_special', 'avg_word_len')
+        Names of datetime/text components to derive; see the supported
+        components above.
+    drop_original : bool, default False
+        Remove source columns from the transformed copy after deriving new
+        features.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     cols = [c for c in _cols(df, columns) if not pd.api.types.is_numeric_dtype(df[c])]
     if not cols:
@@ -1129,7 +1380,7 @@ def add_text_features(
 def _replay(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -> Frame:
     """Replay fitted feature engineering on new data (module-internal).
 
-    Prefer the package-level ``navdata.apply_state``, which accepts states
+    Prefer the package-level ``NaviLib.apply_state``, which accepts states
     from any module in one list and routes each to its owner. This function
     only understands the kinds listed in ``FEATURE_STATE_KINDS``.
 
@@ -1146,7 +1397,7 @@ def _replay(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -
     ordinal gives NaN.  None of these silently drops the row.
 
     >>> train, s = fe.transform_numeric(train, "income", method="auto", return_state=True)
-    >>> test = fe.apply_state(test, s)
+    >>> test = nv.apply_state(test, s)
     """
     if isinstance(state, (list, tuple)):
         for st in state:
@@ -1233,9 +1484,9 @@ def _replay(df: Frame, state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -
             elif m in ("count", "frequency"):
                 tokens = _tokenise(sv, e.get("separator"))
                 lookup = e["mapping"]
-                out[e["names"][0]] = [sum(lookup.get(t, e.get("default", 0.0))
+                out[e["names"][0]] = np.asarray([sum(lookup.get(t, e.get("default", 0.0))
                                           for t in row) if row else np.nan
-                                      for row in tokens]
+                                      for row in tokens], dtype=float)
 
             elif m in ("target", "woe"):
                 out[e["names"][0]] = sv.map(e["mapping"]).astype(float).fillna(e["prior"])
@@ -1304,6 +1555,18 @@ def summary(state: Union[Dict[str, Any], Sequence[Dict[str, Any]]]) -> Frame:
 
     Worth printing into a notebook next to the model score -- three months
     later this table is the only record of how the features were built.
+
+    Parameters
+    ----------
+    state : Union[Dict[str, Any], Sequence[Dict[str, Any]]]
+        Fitted state dictionary, or ordered sequence of states returned with
+        return_state=True.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per feature-engineering state with its generated columns and
+        fitted method.
     """
     states = list(state) if isinstance(state, (list, tuple)) else [state]
     rows = []
@@ -1355,9 +1618,25 @@ def chain(df: Frame, steps: Sequence[Tuple[Callable, Dict[str, Any]]],
     ...                             "target": "y"}),
     ...     (fe.scale,             {"method": "robust", "target": "y"}),
     ... ])
-    >>> test = fe.apply_state(test, states)
+    >>> test = nv.apply_state(test, states)
 
     Each callable must accept ``return_state=True``; it is injected for you.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    steps : Sequence[Tuple[Callable, Dict[str, Any]]]
+        Ordered (callable, keyword_arguments) pairs; each callable must support
+        return_state=True.
+    verbose : bool, default False
+        Print a concise progress/result summary when True.
+
+    Returns
+    -------
+    tuple of DataFrame and list
+        Transformed frame and ordered fitted states for apply_state.
     """
     states = []
     for fn, kwargs in steps:
@@ -1384,3 +1663,11 @@ __all__ = [
     # constants
     "TRANSFORMS", "SCALERS", "ENCODERS", "FEATURE_STATE_KINDS",
 ]
+
+
+# Compatibility aliases: existing notebooks remain supported.
+scale = scale_features
+encode = encode_categorical
+add_datetime = add_datetime_features
+add_cyclical = add_cyclical_features
+__all__ += ['scale_features', 'encode_categorical', 'add_datetime_features', 'add_cyclical_features']

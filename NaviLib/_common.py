@@ -1,5 +1,5 @@
 """
-navdata._common
+NaviLib._common
 ~~~~~~~~~~~~~~~
 
 Shared infrastructure for every module in the package:
@@ -35,8 +35,9 @@ import pandas as pd
 Frame = pd.DataFrame
 State = Dict[str, Any]
 
-PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52",
-           "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
+from .theme import _Palette, _plot_context
+
+PALETTE = _Palette()
 GOOD, BAD, NEUTRAL = "#55A868", "#C44E52", "#8C8C8C"
 
 
@@ -65,11 +66,7 @@ def _style(style: str = "whitegrid", context: str = "notebook"):
     inside a plotting function restyles every other figure the user makes
     for the rest of the session.  A context manager keeps the change local.
     """
-    sns = _sns()
-    if sns is None:
-        yield
-        return
-    with sns.axes_style(style), sns.plotting_context(context):
+    with _plot_context():
         yield
 
 
@@ -114,6 +111,12 @@ def register_state_handler(kinds: Iterable[str], handler: Callable[[Frame, State
         ``handler(df, state) -> DataFrame``, replaying one state.
     owner : str
         Module name, used only to make error messages readable.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     for k in kinds:
         if k in _HANDLERS and _HANDLERS[k] is not handler:
@@ -127,7 +130,14 @@ def register_state_handler(kinds: Iterable[str], handler: Callable[[Frame, State
 
 
 def registered_kinds() -> Frame:
-    """Every state kind the package can replay, and which module owns it."""
+    """Every state kind the package can replay, and which module owns it.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
+    """
     return (pd.DataFrame([{"kind": k, "module": _OWNERS.get(k, "")}
                           for k in sorted(_HANDLERS)])
             .set_index("kind"))
@@ -202,6 +212,10 @@ def apply_state(
         kind = _validate(st, where)
         handler = _HANDLERS[kind]
         try:
+            required = _state_columns(st)
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                raise KeyError(f"Missing source columns: {missing}")
             df = handler(df, st)
         except KeyError as exc:
             if not strict:
@@ -220,12 +234,43 @@ def apply_state(
     return df
 
 
+def _state_columns(state):
+    """Columns required by built-in fitted states, including helper inputs."""
+    kind = state["kind"]
+    if kind in ("transform", "bin", "encode"):
+        return list(state.get("entries", {}))
+    if kind == "outliers":
+        return list(state.get("bounds", {}))
+    if kind == "rare":
+        return list(state.get("keep", {}))
+    if kind == "cyclical":
+        return [state["column"]]
+    if kind == "aggregates":
+        groups = state.get("groups", [])
+        return [groups] if isinstance(groups, str) else list(groups)
+    cols = list(state.get("columns", []))
+    cols.extend(state.get("multivariate", {}).get("block", []))
+    return list(dict.fromkeys(cols))
+
+
 def describe_states(state: Union[State, Sequence[State]]) -> Frame:
     """Readable log of a chain: what ran, in what order, on what, producing what.
 
     Works across modules, so a mixed cleaning + feature chain reads as one
     table.  Worth printing next to your model score -- months later this is
     often the only record of how the features were built.
+
+    Parameters
+    ----------
+    state : Union[State, Sequence[State]]
+        Fitted state dictionary, or ordered sequence of states returned with
+        return_state=True.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per fitted state, including owner, source columns and
+        transformation summary.
     """
     states = list(state) if isinstance(state, (list, tuple)) else [state]
     rows = []
@@ -315,6 +360,22 @@ def save_state(state: Union[State, Sequence[State]], path: str,
     executes code -- never load a state file you did not create.  For
     long-term storage, keep the ``describe_states`` table alongside it so
     the chain can be rebuilt from scratch if the pickle ever stops loading.
+
+    Parameters
+    ----------
+    state : Union[State, Sequence[State]]
+        Fitted state dictionary, or ordered sequence of states returned with
+        return_state=True.
+    path : str
+        Destination or source filesystem path; pathlib.Path is also accepted.
+    compress : int, default 3
+        Joblib compression level; 0 disables compression and larger values trade
+        speed for size.
+
+    Returns
+    -------
+    str
+        Absolute path to the written joblib state file.
     """
     import joblib
     import sklearn
@@ -337,12 +398,26 @@ def save_state(state: Union[State, Sequence[State]], path: str,
 
 
 def load_state(path: str, check_versions: bool = True) -> List[State]:
-    """Load a chain saved by :func:`save_state`, warning on version drift."""
+    """Load a chain saved by :func:`save_state`, warning on version drift.
+
+    Parameters
+    ----------
+    path : str
+        Destination or source filesystem path; pathlib.Path is also accepted.
+    check_versions : bool, default True
+        Warn when saved and installed scikit-learn versions differ. Only load
+        trusted joblib files.
+
+    Returns
+    -------
+    list of dict
+        Ordered fitted states ready for apply_state.
+    """
     import joblib
     import sklearn
     payload = joblib.load(path)
     if not isinstance(payload, dict) or "states" not in payload:
-        raise ValueError(f"{path} is not a navdata state file.")
+        raise ValueError(f"{path} is not a NaviLib state file.")
     if check_versions and payload.get("sklearn_version") != sklearn.__version__:
         warnings.warn(
             f"State was saved with scikit-learn {payload['sklearn_version']}, "

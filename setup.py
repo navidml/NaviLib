@@ -1,7 +1,4 @@
-from setuptools import setup, find_packages
+"""Compatibility entry point; package metadata lives in pyproject.toml."""
+from setuptools import setup
 
-setup(
-    name="NaviLib",
-    version="0.1.0",
-    packages=find_packages(),
-)
+setup()

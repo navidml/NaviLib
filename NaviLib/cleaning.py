@@ -1,5 +1,5 @@
 """
-datakit
+NaviLib
 ~~~~~~~
 
 A practical toolkit for tabular data cleaning, feature selection and
@@ -19,7 +19,7 @@ Design principles
 
 Quick start
 -----------
->>> import datakit as dp
+>>> from NaviLib import cleaning as dp
 >>> dp.overview(df)
 >>> df = dp.clean_names(df)
 >>> df, state = dp.fix_missing(df, method="median", return_state=True)
@@ -50,12 +50,12 @@ from sklearn.model_selection import StratifiedKFold, KFold, train_test_split, cr
 from sklearn.pipeline import Pipeline as SkPipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-__version__ = "2.0.0"
+from ._version import __version__
 
 Frame = pd.DataFrame
 
 #: State kinds this module fits and can replay. Registered with the
-#: package-level dispatcher in ``navdata/__init__.py``.
+#: package-level dispatcher in ``NaviLib/__init__.py``.
 CLEANING_STATE_KINDS = ('missing', 'outliers', 'outliers_mv', 'rare')
 Series = pd.Series
 
@@ -94,6 +94,17 @@ def column_types(df: Frame) -> Dict[str, List[str]]:
     """Split columns into numeric / categorical / datetime / boolean buckets.
 
     Used internally everywhere, but exposed because it is handy on its own.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+
+    Returns
+    -------
+    dict
+        Numeric, categorical, datetime and boolean column-name lists.
     """
     bools = [c for c in df.columns if pd.api.types.is_bool_dtype(df[c])]
     dates = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
@@ -117,6 +128,17 @@ def _resolve_columns(df: Frame, columns: Union[None, str, Sequence[str]]) -> Lis
     if missing:
         raise KeyError(f"Columns not found: {missing}")
     return list(columns)
+
+
+def _fill_series(series, value):
+    """Impute while accommodating nullable integers and new category levels."""
+    if value is None or pd.isna(value):
+        return series.copy()
+    if isinstance(series.dtype, pd.CategoricalDtype) and value not in series.cat.categories:
+        series = series.cat.add_categories([value])
+    if pd.api.types.is_integer_dtype(series.dtype) and isinstance(value, (float, np.floating)) and not float(value).is_integer():
+        series = series.astype("Float64")
+    return series.fillna(value)
 
 
 def _is_binary_target(y: Series) -> bool:
@@ -310,6 +332,23 @@ def scan_outliers(
     Returns
     -------
     DataFrame with ``lower``, ``upper``, ``n_outliers``, ``pct`` per column.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['iqr', 'zscore', 'mad', 'quantile'], default 'iqr'
+        Algorithm to use; see the supported methods and assumptions above.
+    factor : float, default 1.5
+        Multiplier of the interquartile range for lower/upper outlier fences.
+    z : float, default 3.0
+        Standard-deviation or robust-z cutoff for outlier detection.
+    q : Tuple[float, float], default (0.01, 0.99)
+        Lower and upper quantile probabilities used as clipping/outlier bounds.
     """
     cols = _resolve_columns(df, columns)
     cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])
@@ -357,6 +396,22 @@ def check_numeric(df: Frame, column: str, sample: int = 5) -> Dict[str, Any]:
     (unique offenders) and ``examples`` (sample rows).  Use this before
     ``convert(..., to="numeric")`` so you know what you are about to
     turn into NaN.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    column : str
+        Name of the source column to inspect or transform.
+    sample : int, default 5
+        Maximum number of observations sampled for plotting or expensive
+        diagnostics.
+
+    Returns
+    -------
+    dict
+        Conversion success counts and examples of values that cannot be parsed.
     """
     if column not in df.columns:
         raise KeyError(f"Column '{column}' not found.")
@@ -386,6 +441,18 @@ def scan_leakage(df: Frame, target: str, threshold: float = 0.95) -> Frame:
     -------
     DataFrame with per-feature univariate AUC (binary target) or absolute
     correlation (continuous target), sorted descending, plus a ``flag``.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    threshold : float, default 0.95
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
     """
     from sklearn.metrics import roc_auc_score
 
@@ -450,16 +517,25 @@ def clean_names(
         Only rename these columns.
     dedupe : bool, default True
         Append ``_2``, ``_3`` ... when two names collide after cleaning.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+
+
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
-    if df.empty:
-        raise ValueError("Input DataFrame is empty.")
     targets = _resolve_columns(df, columns)
 
     def to_words(name: str) -> List[str]:
         s = str(name).strip()
         s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s)      # camelCase -> camel Case
         s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)   # HTTPServer -> HTTP Server
-        s = re.sub(r"[^0-9A-Za-z]+", " ", s)
+        s = re.sub(r"[\W_]+", " ", s, flags=re.UNICODE)
         return [w for w in s.split() if w]
 
     def apply_style(name: str) -> str:
@@ -484,23 +560,26 @@ def clean_names(
             out = "_" + out
         return out
 
-    mapping = {c: (apply_style(c) if c in targets else c) for c in df.columns}
-    if rename:
-        mapping.update({k: v for k, v in rename.items() if k in df.columns})
-
+    names = [(rename or {}).get(c, apply_style(c) if c in targets else c) for c in df.columns]
     if dedupe:
-        seen: Dict[str, int] = {}
-        for k, v in list(mapping.items()):
-            if v in seen:
-                seen[v] += 1
-                mapping[k] = f"{v}_{seen[v]}"
-            else:
-                seen[v] = 1
+        used = set()
+        reserved = set(names)
+        for i, name in enumerate(names):
+            candidate, suffix = name, 2
+            while candidate in used:
+                candidate = f"{name}_{suffix}"
+                suffix += 1
+                while candidate in reserved:
+                    candidate = f"{name}_{suffix}"
+                    suffix += 1
+            names[i] = candidate
+            used.add(candidate)
+    out = df.copy()
+    out.columns = names
+    return out
 
-    return df.rename(columns=mapping).copy()
 
-
-def convert(
+def convert_columns(
     df: Frame,
     column: str,
     to: Literal["numeric", "category", "string", "datetime", "boolean"],
@@ -528,6 +607,28 @@ def convert(
         Equal-frequency binning instead of explicit edges.
     errors : {"coerce", "raise"}
         ``coerce`` turns unparseable values into NaN (and warns how many).
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    column : str
+        Name of the source column to inspect or transform.
+    bins : Optional[Sequence[float]], default None
+        Number of bins, explicit edges, or supported automatic binning rule as
+        indicated by the signature.
+    labels : Optional[Sequence[str]], default None
+        Explicit class or bin labels, in the order expected by the operation.
+    date_format : Optional[str], default None
+        Explicit datetime parsing format passed to pandas; None uses inference.
+    verbose : bool, default False
+        Print a concise progress/result summary when True.
+
+
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     if column not in df.columns:
         raise KeyError(f"Column '{column}' not found.")
@@ -604,6 +705,17 @@ def drop_missing(
     protect : list, optional
         Never drop these columns, whatever their missing rate (put your
         target here).
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+
+
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     if axis not in ("columns", "rows"):
         raise ValueError("axis must be 'columns' or 'rows'")
@@ -636,6 +748,23 @@ def drop_constant(df: Frame, protect: Optional[Sequence[str]] = None,
     share the same value.  Such columns cost degrees of freedom and teach
     the model nothing -- 'steroid therapy', present in 0.5% of rows, is the
     classic example.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    protect : Optional[Sequence[str]], default None
+        Columns to retain even when they satisfy the removal criterion.
+    max_dominance : float, default 1.0
+        Largest allowed frequency share of a single value before a column is
+        treated as near-constant.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     protect = set(protect or [])
     drop = []
@@ -650,7 +779,7 @@ def drop_constant(df: Frame, protect: Optional[Sequence[str]] = None,
     return df.drop(columns=drop).copy()
 
 
-def fix_duplicates(
+def drop_duplicates(
     df: Frame,
     keep: Literal["first", "last", "none"] = "first",
     subset=None,
@@ -659,12 +788,29 @@ def fix_duplicates(
 
     ``keep="none"`` removes *every* copy including the original -- only use
     that when a duplicate means the record is untrustworthy.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    keep : Literal['first', 'last', 'none'], default 'first'
+        Which duplicate occurrence to retain: 'first', 'last', or False to
+        remove every duplicate occurrence.
+    subset : optional, default None
+        Column names used to identify duplicate rows; None compares all columns.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     keep_arg: Any = False if keep == "none" else keep
     return df.drop_duplicates(subset=subset, keep=keep_arg).copy()
 
 
-def fix_outliers(
+def handle_outliers(
     df: Frame,
     columns=None,
     method: Literal["iqr", "zscore", "mad", "quantile"] = "iqr",
@@ -683,6 +829,35 @@ def fix_outliers(
 
     Set ``return_state=True`` to get the learned bounds back, then replay
     them on the test set with ``apply_state``.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['iqr', 'zscore', 'mad', 'quantile'], default 'iqr'
+        Algorithm to use; see the supported methods and assumptions above.
+    action : Literal['clip', 'nan', 'drop'], default 'clip'
+        How to treat detected observations; the supported actions are given in
+        the type/signature.
+    factor : float, default 1.5
+        Multiplier of the interquartile range for lower/upper outlier fences.
+    z : float, default 3.0
+        Standard-deviation or robust-z cutoff for outlier detection.
+    q : Tuple[float, float], default (0.01, 0.99)
+        Lower and upper quantile probabilities used as clipping/outlier bounds.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     cols = _resolve_columns(df, columns)
     cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])
@@ -749,6 +924,21 @@ def scan_outliers_multivariate(
         Standardise first. Without it, whichever column has the largest
         units dominates every distance and the result is about your units,
         not your data.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['isolation_forest', 'lof', 'elliptic', 'mahalanobis'], default 'isolation_forest'
+        Algorithm to use; see the supported methods and assumptions above.
+    n_neighbors : int, default 20
+        Number of neighbors used by the selected imputer or anomaly detector.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
 
     Returns
     -------
@@ -759,7 +949,7 @@ def scan_outliers_multivariate(
 
     >>> flags, st = dp.scan_outliers_multivariate(train, return_state=True)
     >>> flags[flags.is_outlier].head()
-    >>> test_flags = dp.apply_state(test, st)          # same fitted model
+    >>> test_flags = nv.apply_state(test, st)          # same fitted model
     """
     from sklearn.preprocessing import StandardScaler
 
@@ -858,6 +1048,28 @@ def fix_outliers_multivariate(
     right first move, because dropping rows is irreversible and, on
     imbalanced data, disproportionately deletes the minority class. Check
     what would go before you let it go.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['isolation_forest', 'lof', 'elliptic', 'mahalanobis'], default 'isolation_forest'
+        Algorithm to use; see the supported methods and assumptions above.
+    contamination : float, default 0.03
+        Expected outlier fraction used to set the anomaly decision threshold.
+    action : Literal['drop', 'flag'], default 'flag'
+        How to treat detected observations; the supported actions are given in
+        the type/signature.
+
+    Returns
+    -------
+    DataFrame
+        Copy with flagged observations or anomalous rows removed, according to
+        action.
     """
     flags = scan_outliers_multivariate(df, columns, method=method,
                                        contamination=contamination, **kwargs)
@@ -871,7 +1083,7 @@ def fix_outliers_multivariate(
     raise ValueError("action must be 'drop' or 'flag'.")
 
 
-def fix_missing(
+def impute_missing(
     df: Frame,
     columns=None,
     method: Literal["mean", "median", "mode", "constant",
@@ -894,7 +1106,8 @@ def fix_missing(
     Parameters
     ----------
     columns : list, optional
-        Columns to impute.  ``None`` = every column with missing values.
+        Columns to impute. ``None`` fits a strategy for every input column,
+        including columns that may acquire missing values in a later batch.
         Numeric strategies are applied to numeric columns and ``mode`` to
         the rest, so ``method="median"`` on a mixed frame does the sensible
         thing automatically.
@@ -913,7 +1126,32 @@ def fix_missing(
     return_state : bool
         Return ``(df, state)`` so the identical imputation can be replayed
         on unseen data via ``apply_state``.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    fill_value : Any, default None
+        Constant or fallback value used for imputation. Required for the
+        constant strategy.
+    n_neighbors : int, default 5
+        Number of neighbors used by the selected imputer or anomaly detector.
+    estimator : optional, default None
+        Optional regression estimator for iterative imputation; None uses
+        BayesianRidge.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
+    if method not in {"mean", "median", "mode", "constant", "knn", "mice", "ffill", "bfill", "drop_rows"}:
+        raise ValueError(f"Unknown imputation method: {method!r}")
+    if method == "constant" and fill_value is None:
+        raise ValueError("fill_value is required when method='constant'.")
     cols = _resolve_columns(df, columns)
     out = df.copy()
 
@@ -954,11 +1192,12 @@ def fix_missing(
                 f"found {block}. Use method='median' instead."
             )
         if method == "knn":
-            imp = KNNImputer(n_neighbors=n_neighbors)
+            imp = KNNImputer(n_neighbors=n_neighbors, keep_empty_features=True)
         else:
             imp = IterativeImputer(
                 estimator=estimator or BayesianRidge(),
-                max_iter=10, sample_posterior=True, random_state=random_state,
+                max_iter=10, sample_posterior=False, random_state=random_state,
+                keep_empty_features=True,
             )
         out[block] = imp.fit_transform(out[block])
         state["multivariate"] = {"imputer": imp, "block": block}
@@ -966,7 +1205,7 @@ def fix_missing(
         for c in other_cols:
             mode = out[c].mode(dropna=True)
             val = mode.iloc[0] if len(mode) else fill_value
-            out[c] = out[c].fillna(val)
+            out[c] = _fill_series(out[c], val)
             state["other"][c] = val
         return (out, state) if return_state else out
 
@@ -985,7 +1224,7 @@ def fix_missing(
             val = fill_value
         else:
             raise ValueError(f"Unknown method: {method}")
-        out[c] = out[c].fillna(val)
+        out[c] = _fill_series(out[c], val)
         state["numeric"][c] = val
 
     for c in other_cols:
@@ -995,7 +1234,7 @@ def fix_missing(
             m = out[c].mode(dropna=True)
             val = m.iloc[0] if len(m) else fill_value
         if val is not None:
-            out[c] = out[c].fillna(val)
+            out[c] = _fill_series(out[c], val)
         state["other"][c] = val
 
     return (out, state) if return_state else out
@@ -1004,7 +1243,7 @@ def fix_missing(
 def _replay(df: Frame, state: Dict[str, Any]) -> Frame:
     """Replay a fitted cleaning step on new data (module-internal).
 
-    Prefer the package-level ``navdata.apply_state``, which accepts states
+    Prefer the package-level ``NaviLib.apply_state``, which accepts states
     from any module in one list and routes each to its owner. This function
     only understands the kinds listed in ``CLEANING_STATE_KINDS``.
 
@@ -1013,7 +1252,7 @@ def _replay(df: Frame, state: Dict[str, Any]) -> Frame:
     imputers all come from the training data.
 
     >>> train, s1 = dp.fix_missing(train, method="median", return_state=True)
-    >>> test = dp.apply_state(test, s1)
+    >>> test = nv.apply_state(test, s1)
     """
     if isinstance(state, (list, tuple)):
         for st in state:
@@ -1052,10 +1291,10 @@ def _replay(df: Frame, state: Dict[str, Any]) -> Frame:
             out[block] = state["multivariate"]["imputer"].transform(out[block])
         for c, val in state.get("numeric", {}).items():
             if c in out.columns:
-                out[c] = out[c].fillna(val)
+                out[c] = _fill_series(out[c], val)
         for c, val in state.get("other", {}).items():
             if c in out.columns and val is not None:
-                out[c] = out[c].fillna(val)
+                out[c] = _fill_series(out[c], val)
         return out
 
     if kind == "outliers_mv":
@@ -1110,6 +1349,26 @@ def group_rare(
         Levels below this share of non-missing rows are merged.
     min_count : int, optional
         Absolute alternative to ``min_freq``; takes priority when given.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    other_label : str, default 'other'
+        Replacement category assigned to infrequent or unseen levels when
+        grouping applies.
+    return_state : bool, default False
+        If True, return (transformed_frame, fitted_state). Replay this state on
+        new data with NaviLib.apply_state; do not refit on test data.
+
+
+
+    Returns
+    -------
+    DataFrame or tuple of DataFrame and dict
+        Transformed copy; when return_state=True, also returns fitted parameters
+        for reuse on new data.
     """
     cols = _resolve_columns(df, columns)
     cols = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c])
@@ -1230,6 +1489,25 @@ def select_features(
         Use class-balanced weights while *ranking* on imbalanced targets,
         so rare-class signal is not drowned out.  Ranking only; it does not
         change your data.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    method : Literal['l1', 'tree', 'mi', 'corr', 'permutation'], default 'tree'
+        Algorithm to use; see the supported methods and assumptions above.
+    task : Literal['auto', 'classification', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    cv : int, default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
 
     Returns
     -------
@@ -1240,7 +1518,7 @@ def select_features(
 
     if task == "auto":
         task = ("classification"
-                if (y.dtype == object or str(y.dtype) in ("category", "bool")
+                if (pd.api.types.is_string_dtype(y.dtype) or y.dtype == object or str(y.dtype) in ("category", "bool")
                     or y.nunique() <= 20)
                 else "regression")
     is_clf = task == "classification"
@@ -1323,7 +1601,7 @@ def select_features(
 
     # ---------------- correlation ----------------
     elif method == "corr":
-        yv = y.astype("category").cat.codes.to_numpy() if (is_clf and y.dtype == object) else y.to_numpy()
+        yv = y.astype("category").cat.codes.to_numpy() if (is_clf and not pd.api.types.is_numeric_dtype(y)) else y.to_numpy()
         Xdf = pd.DataFrame(Xt, columns=names)
         raw = Xdf.apply(lambda col: abs(np.corrcoef(col, yv)[0, 1])
                         if col.std() > 0 else 0.0).to_numpy()
@@ -1374,6 +1652,29 @@ def drop_correlated(
     the target is the one dropped.
 
     Returns the reduced frame, or ``(frame, pairs)`` with the decisions.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    threshold : float, default 0.95
+        Decision cutoff or inspection threshold; see the function-specific
+        interpretation above.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    method : Literal['pearson', 'spearman'], default 'spearman'
+        Algorithm to use; see the supported methods and assumptions above.
+    return_pairs : bool, default False
+        Also return the table of correlated pairs used for deciding which
+        columns to drop.
+
+    Returns
+    -------
+    DataFrame or tuple
+        Filtered frame; with return_pairs=True, also returns the correlated-pair
+        table.
     """
     t = column_types(df)
     num = [c for c in t["numeric"] if c != target]
@@ -1514,7 +1815,7 @@ def _make_sampler(method: str, ratio, random_state: int,
     )
 
 
-def balance(
+def resample_data(
     df: Frame,
     target: str,
     method: str = "smote",
@@ -1559,6 +1860,11 @@ def balance(
         Return ``(df_resampled, report)``; report contains before/after
         counts, how many rows are synthetic, and the true prevalence you
         will need for :func:`prior_correct`.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    _trusted : bool, default False
+        Internal resampling guard. Application code should leave this at its
+        default.
 
     Returns
     -------
@@ -1636,7 +1942,14 @@ def balance(
 
 
 def list_methods() -> Frame:
-    """Return every ``balance`` method with a one-line description."""
+    """Return every ``balance`` method with a one-line description.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
+    """
     return (pd.DataFrame(
         [{"method": k, "description": v} for k, v in BALANCE_METHODS.items()]
     ).set_index("method"))
@@ -1652,6 +1965,31 @@ def balance_pipeline(method: str, model, ratio="auto", categorical=None,
 
     >>> pipe = dp.balance_pipeline("smote", LGBMClassifier(), ratio=0.3)
     >>> cross_validate(pipe, X, y, cv=5, scoring="average_precision")
+
+    Parameters
+    ----------
+    method : str
+        Algorithm to use; see the supported methods and assumptions above.
+    model : object
+        Scikit-learn-compatible estimator or pipeline. Include learned
+        preprocessing inside the pipeline during cross-validation.
+    ratio : optional, default 'auto'
+        Sampling strategy passed to imbalanced-learn: supported string, ratio,
+        or class-count mapping.
+    categorical : optional, default None
+        Categorical column names or indices expected by the selected
+        preprocessing/resampling operation.
+    k_neighbors : int, default 5
+        Neighbor count for synthetic-sample generation; must fit the smallest
+        training class.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+    Returns
+    -------
+    imblearn.pipeline.Pipeline
+        Unfitted resampling/estimator pipeline; resampling runs during fitting
+        only.
     """
     _require("imblearn", "imbalanced-learn")
     from imblearn.pipeline import Pipeline as ImbPipeline
@@ -1678,6 +2016,16 @@ def class_weights(y, scheme: Literal["balanced", "sqrt", "custom"] = "balanced",
     >>> w = dp.class_weights(y_train)
     >>> RandomForestClassifier(class_weight=w["class_weight"]).fit(X, y)
     >>> LGBMClassifier(scale_pos_weight=w["scale_pos_weight"]).fit(X, y)
+
+    Parameters
+    ----------
+    y : object
+        Observed target values, positionally aligned with X.
+    scheme : Literal['balanced', 'sqrt', 'custom'], default 'balanced'
+        Class weighting strategy: balanced frequencies, square-root weights, or
+        an explicit custom mapping.
+    custom : Optional[Dict[Any, float]], default None
+        Explicit mapping from class labels to weights when scheme="custom".
     """
     y = pd.Series(y)
     counts = y.value_counts()
@@ -1728,6 +2076,12 @@ def prior_correct(proba, prevalence_train: float, prevalence_true: float):
 
     >>> p = model.predict_proba(X_test)[:, 1]
     >>> p_fixed = dp.prior_correct(p, rep["prevalence_after"], rep["prevalence_before"])
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     p = np.clip(np.asarray(proba, dtype=float), 1e-12, 1 - 1e-12)
     for name, v in (("prevalence_train", prevalence_train), ("prevalence_true", prevalence_true)):
@@ -1761,6 +2115,16 @@ def tune_threshold(
         A callable receives ``(y_true, y_pred)`` and is maximised.
     cost_fn, cost_fp : float
         Relative cost of a false negative / false positive.
+    y_true : object
+        Observed labels or numeric outcomes, in the same row order as
+        predictions.
+    proba : object
+        One-dimensional probabilities for the positive class, aligned with
+        y_true.
+    cost_fp : float, default 1.0
+        Nonnegative cost assigned to one false positive.
+    n_steps : int, default 200
+        Number of evenly spaced candidate decision thresholds.
 
     Returns
     -------
@@ -1844,6 +2208,25 @@ def compare_balance(
         Defaults to a representative spread across all families.
     include_weights : bool
         Also evaluate cost-sensitive weighting (no resampling at all).
+    X : pandas.DataFrame
+        Feature matrix in row order, without the target. Use a DataFrame when
+        column names are required.
+    y : object
+        Observed target values, positionally aligned with X.
+    ratio : Union[float, str], default 0.3
+        Sampling strategy passed to imbalanced-learn: supported string, ratio,
+        or class-count mapping.
+    categorical : Optional[Sequence[str]], default None
+        Categorical column names or indices expected by the selected
+        preprocessing/resampling operation.
+    cv : int, default 5
+        Number of cross-validation folds, or a compatible splitter where the
+        signature allows one. Use group/time-aware folds for dependent
+        observations.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+    n_jobs : int, default -1
+        Parallel workers; -1 uses all available processors, 1 runs serially.
 
     Returns
     -------
@@ -1926,6 +2309,25 @@ def save_table(
     so here it only warns.
 
     Returns the absolute path written.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    path : str
+        Destination or source filesystem path; pathlib.Path is also accepted.
+    fmt : Optional[Literal['csv', 'excel', 'parquet', 'json']], default None
+        Output file format; None infers it from the filename extension.
+    index : bool, default False
+        Include the DataFrame index in the exported table when True.
+    make_dirs : bool, default True
+        Create missing destination parent directories when True.
+
+    Returns
+    -------
+    str
+        Absolute path of the exported table.
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("df must be a pandas DataFrame.")
@@ -1967,7 +2369,7 @@ def save_table(
 #  6. SPLIT
 # ======================================================================
 
-def split(
+def split_data(
     df: Frame,
     target: str,
     test_size: float = 0.2,
@@ -1987,7 +2389,31 @@ def split(
         Grouping column (patient id, hospital, ...).  Rows sharing a group
         are kept together, so the same patient cannot appear on both sides
         of the split.  Stratification is then approximate.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    test_size : float, default 0.2
+        Fraction of the original observations reserved for testing; grouped
+        splits operate on groups.
+    stratify : bool, default True
+        Preserve target class proportions when splitting, where supported.
+        Grouped splitting keeps groups intact instead.
+    random_state : int, default 42
+        Random seed for reproducible sampling, splitting or estimator fitting.
+
+
+
+    Returns
+    -------
+    tuple of pandas.DataFrame
+        Train/test copies, or train/validation/test copies when val_size is
+        positive.
     """
+    if not 0 < test_size < 1 or not 0 <= val_size < 1 or test_size + val_size >= 1:
+        raise ValueError("Require 0 < test_size < 1, val_size >= 0 and test_size + val_size < 1.")
     y = df[target]
     strat = y if (stratify and _is_binary_target(y) or (stratify and y.nunique() <= 20)) else None
 
@@ -2037,3 +2463,13 @@ __all__ = [
     # split
     "split",
 ]
+
+
+# Compatibility aliases: existing notebooks remain supported.
+fix_missing = impute_missing
+fix_duplicates = drop_duplicates
+fix_outliers = handle_outliers
+convert = convert_columns
+split = split_data
+balance = resample_data
+__all__ += ['impute_missing', 'drop_duplicates', 'handle_outliers', 'convert_columns', 'split_data', 'resample_data']

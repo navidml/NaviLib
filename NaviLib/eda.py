@@ -1,12 +1,12 @@
 """
-datakit.eda
+NaviLib.eda
 ~~~~~~~~~~~
 
 Exploratory data analysis: profiling tables, distribution diagnostics,
 feature-target association, correlation, missingness patterns and
 train/test drift.
 
-Companion to ``datakit`` (cleaning + imbalance).  Where ``datakit`` changes
+Companion to ``NaviLib`` (cleaning + imbalance).  Where ``NaviLib`` changes
 your data, this module only looks at it.
 
 Design principles
@@ -27,8 +27,8 @@ Design principles
 
 Quick start
 -----------
->>> import datakit as dp        # cleaning + imbalance
->>> import eda                  # this module
+>>> import NaviLib as dp        # cleaning + imbalance
+>>> from NaviLib import eda                  # this module
 >>> eda.describe_numeric(df)
 >>> eda.relate(df, target="died")          # what actually matters
 >>> eda.plot_target(df, target="died")
@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-__version__ = "2.0.0"
+from ._version import __version__
 
 Frame = pd.DataFrame
 Series = pd.Series
@@ -101,7 +101,7 @@ def _cat_cols(df: Frame, columns=None, max_unique: int = 50) -> List[str]:
 
 
 def _is_classification(y: Series) -> bool:
-    if y.dtype == object or str(y.dtype) in ("category", "bool", "string"):
+    if pd.api.types.is_string_dtype(y.dtype) or y.dtype == object or str(y.dtype) in ("category", "bool", "string"):
         return True
     return y.nunique(dropna=True) <= 20
 
@@ -144,6 +144,25 @@ def describe_numeric(
     No normality *test* is reported here on purpose -- see
     :func:`test_normality` for why a p-value is the wrong tool once you
     have more than a few hundred rows.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    percentiles : Sequence[float], default (0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99)
+        Quantile probabilities in [0, 1] to include in the numeric profile.
+    outlier_method : Literal['iqr', 'mad', 'none'], default 'iqr'
+        Outlier-counting rule: IQR fences, robust MAD bounds, or none.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from scipy.stats import kurtosis as _kurt, skew as _skew
 
@@ -169,7 +188,7 @@ def describe_numeric(
             rows.append({**rec, "mean": float(d.iloc[0]), "median": float(d.iloc[0]),
                          "std": 0.0, "min": float(d.iloc[0]), "max": float(d.iloc[0]),
                          "skew": np.nan, "kurtosis": np.nan, "n_zero": int((d == 0).sum()),
-                         "n_negative": 0, "is_integer": bool(np.allclose(d, d.round())),
+                         "n_negative": int((d < 0).sum()), "is_integer": bool(np.allclose(d, d.round())),
                          "is_binary": False, "n_outliers": 0, "outlier_pct": 0.0,
                          "shape": "constant"})
             continue
@@ -247,6 +266,26 @@ def describe_categorical(
 
     ``entropy_ratio`` (0 to 1) is the normalised Shannon entropy -- 1 means
     perfectly uniform levels, 0 means one level dominates completely.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    top : int, default 3
+        Maximum number of columns, categories or findings included in the
+        displayed result.
+    max_unique : int, default 50
+        Maximum cardinality for automatically selected categorical columns.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     cols = _cat_cols(df, columns, max_unique)
     if not cols:
@@ -320,6 +359,24 @@ def test_normality(
       normal.
 
     Trust the ``verdict`` column, not the p-value.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    alpha : float, default 0.05
+        Significance level in (0, 1); confidence intervals have nominal coverage
+        1 - alpha.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from scipy.stats import kurtosis as _kurt, normaltest, shapiro, skew as _skew
 
@@ -375,6 +432,24 @@ def suggest_transform(df: Frame, columns=None, target_skew: float = 0.5) -> Fram
     Returns a table with ``skew_before``, ``recommended``, ``skew_after``
     and ``reason``.  Apply the winner yourself -- transforming is a
     modelling decision, not an EDA side effect.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    target_skew : float, default 0.5
+        Desired absolute skewness used when recommending a numeric
+        transformation.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from scipy.stats import skew as _skew
     from scipy.stats import yeojohnson
@@ -564,6 +639,26 @@ def relate(
     --------
     >>> eda.relate(df, target="died").head(10)
     >>> eda.relate(df, target="price", task="regression")
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    task : Literal['auto', 'classification', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    max_unique_cat : int, default 50
+        Maximum categorical cardinality considered in feature-target
+        comparisons.
+    sort_by : str, default 'strength'
+        Result column or metric used for ranking the output table.
     """
     if target not in df.columns:
         raise KeyError(f"Target '{target}' not found.")
@@ -701,6 +796,28 @@ def crosstab_target(
     Rates alone are misleading: a level with 3 rows can show a 67% death
     rate and mean nothing.  The ``n`` column and the ``reliable`` flag keep
     that visible.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    column : str
+        Name of the source column to inspect or transform.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    normalize : Literal['index', 'columns', 'all', 'none'], default 'index'
+        Return relative frequencies instead of raw counts, according to the
+        supported normalization option.
+    min_count : int, default 10
+        Minimum group count required for inclusion in the table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     ct = pd.crosstab(df[column], df[target], dropna=False)
     counts = ct.sum(axis=1)
@@ -736,6 +853,28 @@ def correlation_table(
 
     With ``target`` given, the correlation of each member of the pair with
     the target is added, so you can tell which one to drop.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    method : Literal['pearson', 'spearman', 'kendall'], default 'spearman'
+        Algorithm to use; see the supported methods and assumptions above.
+    min_abs : float, default 0.0
+        Minimum absolute correlation retained in the returned table.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     cols = _numeric_cols(df, columns)
     cols = [c for c in cols if c != target]
@@ -777,6 +916,21 @@ def missing_pattern(df: Frame, top: int = 15) -> Frame:
     Column-by-column missing rates hide structure.  If ``lab_a``, ``lab_b``
     and ``lab_c`` are always missing together, that is one phenomenon (the
     panel was not ordered), not three -- and it changes how you impute.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    top : int, default 15
+        Maximum number of columns, categories or findings included in the
+        displayed result.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     na = df.isna()
     cols_with_na = na.columns[na.any()].tolist()
@@ -802,6 +956,20 @@ def missing_correlation(df: Frame, min_abs: float = 0.3) -> Frame:
     A high value means the two columns' missingness is driven by the same
     upstream cause.  Pairs listed here should be imputed with the same
     strategy, or given a shared "was_missing" indicator.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    min_abs : float, default 0.3
+        Minimum absolute correlation retained in the returned table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     na = df.isna()
     na = na.loc[:, na.any() & (na.mean() < 1.0)]
@@ -827,7 +995,27 @@ def psi(expected, actual, bins: int = 10, eps: float = 1e-6) -> float:
     Rule of thumb: < 0.1 stable, 0.1-0.25 moderate shift, > 0.25 large
     shift.  Bin edges come from ``expected`` (your reference / training
     sample) so the comparison is anchored.
+
+    Parameters
+    ----------
+    expected : object
+        Reference observations that define the baseline distribution.
+    actual : object
+        Current observations to compare against the reference distribution.
+    bins : int, default 10
+        Number of bins, explicit edges, or supported automatic binning rule as
+        indicated by the signature.
+    eps : float, default 1e-06
+        Small positive probability floor preventing division by zero in
+        distribution comparisons.
+
+    Returns
+    -------
+    float
+        Population Stability Index; NaN when either nonmissing sample is empty.
     """
+    if not isinstance(bins, (int, np.integer)) or bins < 2 or not 0 < eps < 1:
+        raise ValueError("bins must be an integer >= 2 and eps must be in (0, 1).")
     e = pd.Series(expected).dropna()
     a = pd.Series(actual).dropna()
     if len(e) == 0 or len(a) == 0:
@@ -869,10 +1057,38 @@ def compare_distributions(
 
     >>> tr, te = dp.split(df, "died")
     >>> eda.compare_distributions(tr, te).head()
+
+    Parameters
+    ----------
+    reference : pandas.DataFrame
+        Reference dataset or datetime baseline, depending on this operation.
+    current : pandas.DataFrame
+        Current DataFrame whose distributions are compared to the reference.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    psi_bins : int, default 10
+        Number of reference-quantile bins for numeric Population Stability
+        Index.
+    label_a : str, default 'reference'
+        Human-readable name of the reference sample, used in output columns and
+        legends.
+    label_b : str, default 'current'
+        Human-readable name of the current sample, used in output columns and
+        legends.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     from scipy.stats import ks_2samp
 
-    cols = [c for c in (columns or reference.columns) if c in current.columns]
+    selected = reference.columns if columns is None else ([columns] if isinstance(columns, str) else columns)
+    cols = [c for c in selected if c in current.columns]
+    if not cols:
+        raise ValueError("No shared columns to compare.")
     rows = []
     for c in cols:
         a, b = reference[c], current[c]
@@ -924,6 +1140,25 @@ def compare_groups(
     The classic "Table 1" of a clinical paper: mean +/- sd per group for
     numerics, percentages for categoricals, plus a standardised difference
     so you can see which contrasts are actually large.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    group : str
+        Column name or names defining groups for the operation.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    max_groups : int, default 10
+        Maximum number of groups included in the comparison.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Structured results with named columns; see the measures and
+        interpretation described above.
     """
     if group not in df.columns:
         raise KeyError(f"Group column '{group}' not found.")
@@ -984,7 +1219,7 @@ def plot_distribution(
     figsize: Optional[Tuple[float, float]] = None,
     max_cols: int = 12,
     show: bool = True,
-    color: str = DEFAULT_PALETTE[0],
+    color: Optional[str] = None,
 ):
     """Plot the distribution of one or many numeric columns.
 
@@ -1006,11 +1241,30 @@ def plot_distribution(
         distributions between classes.
     bins : int or str
         Passed to numpy; ``"auto"`` uses the Freedman-Diaconis rule.
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    kind : Literal['full', 'hist', 'box'], default 'full'
+        Plot layout/type; choose one of the options shown in the signature.
+    kde : bool, default True
+        Overlay a kernel-density estimate when the sample supports it.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    max_cols : int, default 12
+        Maximum number of columns shown to keep the figure readable.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+    color : Optional[str], default None
+        Explicit matplotlib color override. None uses the active NaviLib
+        palette.
 
     Returns
     -------
     matplotlib Figure.
     """
+    color = DEFAULT_PALETTE[0] if color is None else color
     plt, sns = _plt(), _sns()
     from scipy import stats as sps
 
@@ -1118,7 +1372,7 @@ def plot_categorical(
     sort: Literal["count", "index"] = "count",
     ohe_prefix: bool = True,
     figsize: Optional[Tuple[float, float]] = None,
-    color: str = DEFAULT_PALETTE[0],
+    color: Optional[str] = None,
     title: Optional[str] = None,
     show: bool = True,
     return_counts: bool = False,
@@ -1138,6 +1392,49 @@ def plot_categorical(
       hidden by ``top_n``.
 
     Returns the Figure, or ``(fig, counts)`` when ``return_counts=True``.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    column : str
+        Name of the source column to inspect or transform.
+    normalize : bool, default False
+        Return relative frequencies instead of raw counts, according to the
+        supported normalization option.
+    top_n : Optional[int], default 20
+        Maximum number of categories displayed; remaining levels are omitted
+        from the plot.
+    include_missing : bool, default True
+        Include missing observations as a separate category when True.
+    horizontal : Union[bool, Literal['auto']], default 'auto'
+        Use horizontal bars; auto chooses based on label length and category
+        count.
+    sort : Literal['count', 'index'], default 'count'
+        Order categories by frequency or label, as supported by the signature.
+    ohe_prefix : bool, default True
+        Prefix identifying one-hot columns to summarize as one categorical
+        variable.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    color : Optional[str], default None
+        Explicit matplotlib color override. None uses the active NaviLib
+        palette.
+    title : Optional[str], default None
+        Custom title shown above the chart or report.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+    return_counts : bool, default False
+        Return (figure, counts_table) instead of only the figure.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     counts, source = _category_counts(df, column, normalize, include_missing, ohe_prefix)
@@ -1244,6 +1541,35 @@ def plot_target(
     boxplots for numeric features, event-rate bars for categorical ones.
     For categorical panels a dashed line marks the overall base rate, so
     you can see at a glance which levels sit above or below it.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    top_k : int, default 9
+        Maximum number of features or categories shown.
+    task : Literal['auto', 'classification', 'regression'], default 'auto'
+        Prediction task. Auto uses target dtype/cardinality heuristics; specify
+        regression for low-cardinality numeric outcomes.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt, sns = _plt(), _sns()
     y = df[target]
@@ -1327,6 +1653,33 @@ def plot_correlation(
     distance, which turns a noisy checkerboard into visible groups of
     redundant features.  Annotation is switched off automatically above 15
     columns, where the numbers become unreadable anyway.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    method : Literal['pearson', 'spearman', 'kendall'], default 'spearman'
+        Algorithm to use; see the supported methods and assumptions above.
+    cluster : bool, default True
+        Reorder correlated variables by hierarchical clustering for easier
+        visual inspection.
+    annot : Union[bool, Literal['auto']], default 'auto'
+        Print numeric correlation values inside heatmap cells.
+    mask_upper : bool, default True
+        Hide the upper triangle of a symmetric correlation matrix.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt, sns = _plt(), _sns()
     cols = [c for c in _numeric_cols(df, columns) if df[c].nunique(dropna=True) > 1]
@@ -1378,6 +1731,26 @@ def plot_missing(
     mean whole rows are incomplete, vertical blocks mean a column failed
     wholesale, and aligned gaps across columns mean the same event caused
     all of them.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    max_cols : int, default 40
+        Maximum number of columns shown to keep the figure readable.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     na = df.isna()
@@ -1422,6 +1795,36 @@ def plot_drift(
 
     Columns are ranked by PSI (see :func:`compare_distributions`) so the
     panels you get are the ones actually worth looking at.
+
+    Parameters
+    ----------
+    reference : pandas.DataFrame
+        Reference dataset or datetime baseline, depending on this operation.
+    current : pandas.DataFrame
+        Current DataFrame whose distributions are compared to the reference.
+    columns : optional, default None
+        Source column name or sequence of names. None selects the eligible
+        columns described above.
+    top_k : int, default 6
+        Maximum number of features or categories shown.
+    label_a : str, default 'reference'
+        Human-readable name of the reference sample, used in output columns and
+        legends.
+    label_b : str, default 'current'
+        Human-readable name of the current sample, used in output columns and
+        legends.
+    figsize : Optional[Tuple[float, float]], default None
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt, sns = _plt(), _sns()
     table = compare_distributions(reference, current, columns,
@@ -1474,6 +1877,27 @@ def plot_balance(
     Prints the number that decides your whole modelling strategy: how many
     minority events you actually have.  Below ~50, no resampling technique
     will save you -- the constraint is information, not balance.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : str
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    figsize : Tuple[float, float], default (9, 4)
+        Figure width and height in inches; None uses the function-specific
+        layout.
+    show : bool, default True
+        Display the figure when True. False closes the pyplot window while
+        returning a usable Figure for saving.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure using the active NaviLib theme; retain it for savefig or further
+        customization.
     """
     plt = _plt()
     y = df[target].dropna()
@@ -1530,6 +1954,28 @@ def report(
 
     >>> res = eda.report(df, target="died")
     >>> res["relate"].head()
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input pandas DataFrame. Operations return new results rather than
+        modifying this frame in place.
+    target : Optional[str], default None
+        Target column name. Keep it out of predictor transformations and fit
+        supervised operations on training data only.
+    plots : bool, default False
+        Include diagnostic figures alongside the numerical report.
+    top : int, default 10
+        Maximum number of columns, categories or findings included in the
+        displayed result.
+    verbose : bool, default True
+        Print a concise progress/result summary when True.
+
+    Returns
+    -------
+    dict
+        Analysis tables and optional figure handles for the selected EDA
+        sections.
     """
     out: Dict[str, Any] = {"shape": df.shape}
     findings: List[str] = []
