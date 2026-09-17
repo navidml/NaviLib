@@ -9,6 +9,8 @@ Readable, reproducible workflows for tabular analysis and machine learning.
 From the first quality check to a fitted model and a report worth sharing.
 
 <p>
+  <a href="https://pypi.org/project/NaviLib/"><img src="https://img.shields.io/pypi/v/navilib?style=flat-square&color=006dad&label=PyPI" alt="PyPI version"></a>
+  <a href="https://github.com/navidml/NaviLib/actions/workflows/tests.yml"><img src="https://github.com/navidml/NaviLib/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 or newer">
   <img src="https://img.shields.io/badge/pandas-DataFrame%20native-150458?style=flat-square&logo=pandas&logoColor=white" alt="pandas DataFrame native">
   <img src="https://img.shields.io/badge/scikit--learn-Compatible-F7931E?style=flat-square&logo=scikitlearn&logoColor=white" alt="scikit-learn compatible">
@@ -42,13 +44,13 @@ Built on NumPy, pandas, SciPy, scikit-learn, Matplotlib, Seaborn, and statsmodel
 
 ## Installation
 
-Requires **Python 3.10 or newer**. Download or clone this repository, open a terminal in its root directory, and run:
+Requires **Python 3.10 or newer**.
 
 ```bash
-python -m pip install .
+pip install navilib
 ```
 
-The distribution and import name are both **`NaviLib`**:
+The import name is **`NaviLib`**:
 
 ```python
 import NaviLib as nv
@@ -56,15 +58,22 @@ import NaviLib as nv
 
 Add optional capabilities as needed:
 
-| Extra | Install from the repository root | Adds |
+| Extra | Install | Adds |
 | :--- | :--- | :--- |
-| Notebook | `python -m pip install ".[notebook]"` | Jinja2 for styled pandas tables |
-| Data I/O | `python -m pip install ".[io]"` | Excel and Parquet dependencies |
-| Class balancing | `python -m pip install ".[balance]"` | imbalanced-learn |
-| Explainability | `python -m pip install ".[explain]"` | SHAP |
-| Development | `python -m pip install -e ".[dev,notebook]"` | Editable install, testing, and build tools |
+| Notebook | `pip install "navilib[notebook]"` | Jinja2 for styled pandas tables |
+| Data I/O | `pip install "navilib[io]"` | Excel and Parquet dependencies |
+| Class balancing | `pip install "navilib[balance]"` | imbalanced-learn |
+| Explainability | `pip install "navilib[explain]"` | SHAP |
 
-Extras can be combined, for example: `python -m pip install ".[notebook,io]"`.
+Extras can be combined, for example: `pip install "navilib[notebook,io]"`.
+
+To work on NaviLib itself, clone the repository and install it in editable mode:
+
+```bash
+git clone https://github.com/navidml/NaviLib.git
+cd NaviLib
+python -m pip install -e ".[dev,notebook]"
+```
 
 ## Quick start
 
@@ -274,7 +283,7 @@ The catalog includes module names, signatures, summaries, and compatibility alia
 | [Migration guide](docs/MIGRATION.md) | Preferred names, compatibility aliases, and behavior changes in 0.5 |
 | [Executable walkthrough](examples/walkthrough.py) | Synthetic data, model evaluation, and HTML reports in all three themes |
 
-After installation, run the complete walkthrough from the repository root:
+The walkthrough lives in the repository. Clone it (or download `examples/walkthrough.py`), then run from the repository root:
 
 ```bash
 python examples/walkthrough.py
@@ -301,6 +310,10 @@ python tools/build_docs.py
 ```
 
 For a bug report, include a minimal reproducible example, your Python and NaviLib versions, and the expected behavior. Small synthetic datasets make examples easier to reproduce and share.
+
+## License
+
+Released under the [MIT License](LICENSE).
 
 ---
 
