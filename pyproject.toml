@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "Navid Bordbar", email = "navidbordbar2004@gmail.com"}]
+authors = [{name = "Navid Bordbar", email = "navid.b1515@gmail.com"}]
 keywords = ["data-cleaning", "feature-engineering", "machine-learning", "statistics", "tabular-data"]
 classifiers = [
     "Development Status :: 4 - Beta",
